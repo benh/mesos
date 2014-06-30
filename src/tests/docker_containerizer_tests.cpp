@@ -24,8 +24,10 @@
 #include "tests/flags.hpp"
 #include "tests/mesos.hpp"
 
-#include "slave/slave.hpp"
 #include "slave/containerizer/docker.hpp"
+#include "slave/slave.hpp"
+#include "slave/state.hpp"
+
 
 using namespace mesos;
 using namespace mesos::internal;
@@ -44,6 +46,7 @@ using std::list;
 using std::string;
 
 using testing::_;
+using testing::DoAll;
 using testing::DoDefault;
 using testing::Invoke;
 using testing::Return;
@@ -148,8 +151,6 @@ TEST_F(DockerContainerizerTest, DOCKER_Launch)
 
   task.mutable_command()->CopyFrom(command);
 
-  Future<TaskStatus> statusRunning;
-
   vector<TaskInfo> tasks;
   tasks.push_back(task);
 
@@ -159,14 +160,14 @@ TEST_F(DockerContainerizerTest, DOCKER_Launch)
                     Invoke(&dockerContainerizer,
                            &MockDockerContainerizer::_launch)));
 
+  Future<TaskStatus> statusRunning;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
     .WillOnce(FutureArg<1>(&statusRunning))
     .WillRepeatedly(DoDefault());
 
   driver.launchTasks(offers.get()[0].id(), tasks);
 
-  AWAIT_READY(containerId);
-
+  AWAIT_READY_FOR(containerId, Seconds(60));
   AWAIT_READY_FOR(statusRunning, Seconds(60));
   EXPECT_EQ(TASK_RUNNING, statusRunning.get().state());
 
@@ -210,7 +211,8 @@ TEST_F(DockerContainerizerTest, DOCKER_Usage)
 
   MockDockerContainerizer dockerContainerizer(flags, true, docker);
 
-  Try<PID<Slave> > slave = StartSlave(&dockerContainerizer);
+  Try<PID<Slave> > slave =
+    StartSlave(&dockerContainer, flags);
   ASSERT_SOME(slave);
 
   MockScheduler sched;
@@ -248,8 +250,6 @@ TEST_F(DockerContainerizerTest, DOCKER_Usage)
 
   task.mutable_command()->CopyFrom(command);
 
-  Future<TaskStatus> statusRunning;
-
   vector<TaskInfo> tasks;
   tasks.push_back(task);
 
@@ -259,14 +259,14 @@ TEST_F(DockerContainerizerTest, DOCKER_Usage)
                     Invoke(&dockerContainerizer,
                            &MockDockerContainerizer::_launch)));
 
+  Future<TaskStatus> statusRunning;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
     .WillOnce(FutureArg<1>(&statusRunning))
     .WillRepeatedly(DoDefault());
 
   driver.launchTasks(offers.get()[0].id(), tasks);
 
-  AWAIT_READY(containerId);
-
+  AWAIT_READY_FOR(containerId, Seconds(60));
   AWAIT_READY_FOR(statusRunning, Seconds(60));
   EXPECT_EQ(TASK_RUNNING, statusRunning.get().state());
 
@@ -275,9 +275,18 @@ TEST_F(DockerContainerizerTest, DOCKER_Usage)
   AWAIT_READY(usage);
   // TODO(yifan): Verify the usage.
 
+  // Verify the usage.
+  EXPECT_EQ(2, usage.get().cpus_limit());
+  EXPECT_EQ(1024*1024*1024, usage.get().mem_limit_bytes());
+
+  Future<containerizer::Termination> termination =
+    dockerContainerizer.wait(containerId.get());
+
   dockerContainerizer.destroy(containerId.get());
 
-  // Usage() should fail again since the container is destroyed.
+  AWAIT_READY(termination);
+
+  // Usage() should fail again since the container is destroyed
   usage = dockerContainerizer.usage(containerId.get());
   AWAIT_FAILED(usage);
 
