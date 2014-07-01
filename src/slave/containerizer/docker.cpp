@@ -634,16 +634,20 @@ Future<ResourceStatistics> DockerContainerizerProcess::usage(
 {
 #ifndef __linux__
   return Failure("Does not support usage() on non-linux platform");
-#endif // __linux__
-
+#else
   if (!promises.contains(containerId)) {
     return Failure("Unknown container: " + stringify(containerId));
+  }
+
+  if (destroying.contains(containerId)) {
+    return Failure("Container is being removed; " + stringify(containerId));
   }
 
   // Construct the Docker container name.
   string name = DOCKER_NAME_PREFIX + stringify(containerId);
   return docker.inspect(name)
     .then(defer(self(), &Self::_usage, containerId, lambda::_1));
+#endif // __linux__
 }
 
 
@@ -652,29 +656,30 @@ Future<ResourceStatistics> DockerContainerizerProcess::_usage(
     const Docker::Container& container)
 {
   Option<pid_t> pid = container.pid();
-      if (pid.isNone()) {
+  if (pid.isNone()) {
     return Failure("Container is not running");
   }
-  Try<ResourceStatistics> result =
-    mesos::internal::usage(pid, true, true);
-  if (result.isError()) {
-    return Failure(result.error());
+
+  Try<ResourceStatistics> statistics =
+    mesos::internal::usage(pid.get(), true, true);
+  if (statistics.isError()) {
+    return Failure(statistics.error());
   }
 
-  ResourceStatistics usage = result.get();
+  ResourceStatistics result = statistics.get();
 
   // Set the resource allocations.
   Resources resource = resources[containerId];
   Option<Bytes> mem = resource.mem();
   if (mem.isSome()) {
-    usage.set_mem_limit_bytes(mem.get().bytes());
+    result.set_mem_limit_bytes(mem.get().bytes());
   }
 
   Option<double> cpus = resource.cpus();
   if (cpus.isSome()) {
-    usage.set_cpus_limit(cpus.get());
+    result.set_cpus_limit(cpus.get());
   }
-  return usage;
+  return result;
 }
 
 

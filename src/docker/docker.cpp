@@ -73,9 +73,11 @@ Option<pid_t> Docker::Container::pid() const
   map<string, JSON::Value>::const_iterator entry =
     value.as<JSON::Object>().values.find("Pid");
   CHECK(entry != json.values.end());
-  value = entry->second;
-  CHECK(value.is<JSON::Number>());
-  pid_t pid = pid_t(value.as<JSON::Number>().value);
+  // TODO(yifan) reload operator '=' to reuse the value variable above.
+  JSON::Value pidValue = entry->second;
+  CHECK(pidValue.is<JSON::Number>());
+
+  pid_t pid = pid_t(pidValue.as<JSON::Number>().value);
   if (pid == 0) {
     return None();
   }
@@ -97,13 +99,13 @@ Future<Option<int> > Docker::run(
   if (cpus.isSome()) {
     uint64_t cpuShare =
       std::max((uint64_t) (CPU_SHARES_PER_CPU * cpus.get()), MIN_CPU_SHARES);
-    cmd += " -c " + std::to_string(cpuShare);
+    cmd += " -c " + stringify(cpuShare);
   }
 
   Option<Bytes> mem = resources.mem();
   if (mem.isSome()) {
     Bytes memLimit = std::max(mem.get(), MIN_MEMORY);
-    cmd += " -m " + std::to_string(memLimit.bytes());
+    cmd += " -m " + stringify(memLimit.bytes());
   }
 
   cmd += " --name=" + name + " " + image + " " + command;
