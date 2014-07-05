@@ -29,6 +29,9 @@
 #include <stout/nothing.hpp>
 #include <stout/option.hpp>
 
+#include "mesos/resources.hpp"
+
+
 // Abstraction for working with Docker (modeled on CLI).
 class Docker
 {
@@ -62,7 +65,8 @@ public:
   process::Future<Option<int> > run(
       const std::string& image,
       const std::string& command,
-      const std::string& name) const;
+      const std::string& name,
+      const mesos::Resources& resources) const;
 
   // Performs 'docker kill CONTAINER'.
   process::Future<Option<int> > kill(
@@ -73,13 +77,22 @@ public:
       const std::string& container,
       const bool force = false) const;
 
+  // Performs 'docker kill && docker rm'
+  // if 'docker kill' fails, then will do a 'docker rm -f'.
+  //
+  // TODO(yifan): Depreciate this when the docker provides
+  // something like 'docker rm --kill'.
+  process::Future<Option<int> > killAndRm(
+      const std::string& container) const;
+
   // Performs 'docker inspect CONTAINER'.
   process::Future<Container> inspect(
       const std::string& container) const;
 
   // Performs 'docker ps (-a)'.
   process::Future<std::list<Container> > ps(
-      const bool all = false) const;
+      const bool all = false,
+      const std::string prefix = "") const;
 
   process::Future<std::string> info() const;
 
@@ -89,7 +102,12 @@ private:
       const process::Subprocess& s);
   static process::Future<std::list<Container> > _ps(
       const Docker& docker,
-      const process::Subprocess& s);
+      const process::Subprocess& s,
+      const std::string prefix);
+  static process::Future<Option<int> > _killAndRm(
+      const Docker& docker,
+      const std::string& container,
+      const Option<int>& status);
 
   const std::string path;
 };

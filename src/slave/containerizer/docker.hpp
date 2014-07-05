@@ -45,6 +45,8 @@ public:
       const Flags& flags,
       bool local);
 
+  static Try<Nothing> installIsolators(const Flags& flags);
+
   DockerContainerizer(
       const Flags& flags,
       bool local,

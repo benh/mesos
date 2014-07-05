@@ -1,3 +1,21 @@
+/**
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 #include <map>
 #include <vector>
 
@@ -19,6 +37,13 @@ using std::list;
 using std::map;
 using std::string;
 using std::vector;
+
+// CPU subsystem constants.
+const uint64_t CPU_SHARES_PER_CPU = 1024;
+const uint64_t MIN_CPU_SHARES = 10;
+
+// Memory subsystem constants.
+const Bytes MIN_MEMORY = Megabytes(32);
 
 
 Try<Nothing> Docker::validate(const Docker &docker)
@@ -66,9 +91,11 @@ Option<pid_t> Docker::Container::pid() const
   map<string, JSON::Value>::const_iterator entry =
     value.as<JSON::Object>().values.find("Pid");
   CHECK(entry != json.values.end());
-  value = entry->second;
-  CHECK(value.is<JSON::Number>());
-  pid_t pid = pid_t(value.as<JSON::Number>().value);
+  // TODO(yifan) reload operator '=' to reuse the value variable above.
+  JSON::Value pidValue = entry->second;
+  CHECK(pidValue.is<JSON::Number>());
+
+  pid_t pid = pid_t(pidValue.as<JSON::Number>().value);
   if (pid == 0) {
     return None();
   }
@@ -78,13 +105,33 @@ Option<pid_t> Docker::Container::pid() const
 Future<Option<int> > Docker::run(
     const string& image,
     const string& command,
-    const string& name) const
+    const string& name,
+    const mesos::Resources& resources) const
 {
-  VLOG(1) << "Running " << path << " run -d --name=" << name << " "
-          << image << " " << command;
+  CHECK(resources.size() != 0);
+
+  string cmd = " run -d";
+
+  // TODO(yifan): Support other resources (e.g. disk, ports).
+  Option<double> cpus = resources.cpus();
+  if (cpus.isSome()) {
+    uint64_t cpuShare =
+      std::max((uint64_t) (CPU_SHARES_PER_CPU * cpus.get()), MIN_CPU_SHARES);
+    cmd += " -c " + stringify(cpuShare);
+  }
+
+  Option<Bytes> mem = resources.mem();
+  if (mem.isSome()) {
+    Bytes memLimit = std::max(mem.get(), MIN_MEMORY);
+    cmd += " -m " + stringify(memLimit.bytes());
+  }
+
+  cmd += " --name=" + name + " " + image + " " + command;
+
+  VLOG(1) << "Running " << path << cmd;
 
   Try<Subprocess> s = subprocess(
-      path + " run -d --name=" + name + " " + image + " " + command,
+      path + cmd,
       Subprocess::PIPE(),
       Subprocess::PIPE(),
       Subprocess::PIPE());
@@ -92,7 +139,6 @@ Future<Option<int> > Docker::run(
   if (s.isError()) {
     return Failure(s.error());
   }
-
   return s.get().status();
 }
 
@@ -115,7 +161,9 @@ Future<Option<int> > Docker::kill(const string& container) const
 }
 
 
-Future<Option<int> > Docker::rm(const string& container, const bool force) const
+Future<Option<int> > Docker::rm(
+    const string& container,
+    const bool force) const
 {
   string cmd = force ? " rm -f " : " rm ";
 
@@ -132,6 +180,26 @@ Future<Option<int> > Docker::rm(const string& container, const bool force) const
   }
 
   return s.get().status();
+}
+
+
+Future<Option<int> > Docker::killAndRm(const string& container) const
+{
+  return kill(container)
+    .then(lambda::bind(Docker::_killAndRm, *this, container, lambda::_1));
+}
+
+
+Future<Option<int> > Docker::_killAndRm(
+    const Docker& docker,
+    const string& container,
+    const Option<int>& status)
+{
+  // If 'kill' fails, then do a 'rm -f'.
+  if (status.isNone()) {
+    return docker.rm(container, true);
+  }
+  return docker.rm(container);
 }
 
 
@@ -241,7 +309,9 @@ Future<Docker::Container> Docker::_inspect(const Subprocess& s)
 }
 
 
-Future<list<Docker::Container> > Docker::ps(const bool all) const
+Future<list<Docker::Container> > Docker::ps(
+    const bool all,
+    const string prefix) const
 {
   string cmd = all ? " ps -a" : " ps";
 
@@ -258,13 +328,14 @@ Future<list<Docker::Container> > Docker::ps(const bool all) const
   }
 
   return s.get().status()
-    .then(lambda::bind(&Docker::_ps, Docker(path), s.get()));
+    .then(lambda::bind(&Docker::_ps, *this, s.get(), prefix));
 }
 
 
 Future<list<Docker::Container> > Docker::_ps(
     const Docker& docker,
-    const Subprocess& s)
+    const Subprocess& s,
+    const string prefix)
 {
   // Check the exit status of 'docker ps'.
   CHECK_READY(s.status());
@@ -298,12 +369,19 @@ Future<list<Docker::Container> > Docker::_ps(
   list<Future<Docker::Container> > futures;
 
   foreach (const string& line, lines) {
-    // Inspect the container.
-    futures.push_back(docker.inspect(strings::split(line, " ")[0]));
+    // Inspect the containers that we are interested in.
+    vector<string> columns =
+      strings::split(strings::trim(line), " ");
+    string name = columns[columns.size()-1];
+    if (prefix.size() == 0 ||
+        strings::startsWith(name, prefix)) {
+      futures.push_back(docker.inspect(name));
+    }
   }
 
   return collect(futures);
 }
+
 
 Future<std::string> Docker::info() const
 {
