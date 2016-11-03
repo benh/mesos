@@ -202,26 +202,26 @@ public:
 
     virtual Socket::Kind kind() const = 0;
 
-    /**
-     * Construct a new `Socket` from the given impl.
-     *
-     * This is a proxy function, as `Impl`s derived from this won't have
-     * access to the Socket::Socket(...) constructors.
-     */
-    // TODO(jmlvanre): These should be protected; however, gcc complains
-    // when using them from within a lambda of a derived class.
-    static Socket socket(std::shared_ptr<Impl>&& that)
-    {
-      return Socket(std::move(that));
-    }
+//     /**
+//      * Construct a new `Socket` from the given impl.
+//      *
+//      * This is a proxy function, as `Impl`s derived from this won't have
+//      * access to the Socket::Socket(...) constructors.
+//      */
+//     // TODO(jmlvanre): These should be protected; however, gcc complains
+//     // when using them from within a lambda of a derived class.
+//     static Socket socket(std::shared_ptr<Impl>&& that)
+//     {
+//       return Socket(std::move(that));
+//     }
 
-    /**
-     * @copydoc process::network::Socket::Impl::socket
-     */
-    static Socket socket(const std::shared_ptr<Impl>& that)
-    {
-      return Socket(that);
-    }
+//     /**
+//      * @copydoc process::network::Socket::Impl::socket
+//      */
+//     static Socket socket(const std::shared_ptr<Impl>& that)
+//     {
+//       return Socket(that);
+//     }
 
   protected:
     explicit Impl(int _s) : s(_s) { CHECK(s >= 0); }
@@ -239,10 +239,10 @@ public:
       return released;
     }
 
-    /**
-     * Construct a `Socket` wrapper from this implementation.
-     */
-    Socket socket() { return Socket(shared_from_this()); }
+//     /**
+//      * Construct a `Socket` wrapper from this implementation.
+//      */
+//     Socket socket() { return Socket(shared_from_this()); }
 
     /**
      * Returns a `std::shared_ptr<T>` from this implementation.
@@ -255,6 +255,48 @@ public:
       CHECK(pointer);
       return pointer;
     }
+
+//     using std::enable_shared_from_this<Impl>::shared_from_this;
+
+//     /**
+//      * Returns a `std::shared_ptr<T>` where `this` must be dynamically
+//      * castable to `T`.
+//      */
+//     template <typename T>
+//     std::shared_ptr<T> shared_from_this()
+//     {
+//       static_assert(
+//           std::is_base_of<Impl, T>::value,
+//           "Expecting type to derive from `Impl`");
+//       std::shared_ptr<T> pointer =
+//         std::dynamic_pointer_cast<T>(shared_from_this());
+//       CHECK(pointer);
+//       return pointer;
+//     }
+
+//     /**
+//      * Returns a `std::weak_ptr<Impl>`.
+//      */
+//     std::weak_ptr<Impl> weak_from_this()
+//     {
+//       return std::weak_ptr<Impl>(shared_from_this());
+//     }
+
+//     /**
+//      * Returns a `std::weak_ptr<T>` where `this` must be dynamically
+//      * castable to `T`.
+//      */
+//     template <typename T>
+//     std::shared_ptr<T> weak_from_this()
+//     {
+//       static_assert(
+//           std::is_base_of<Impl, T>::value,
+//           "Expecting type to derive from `Impl`");
+//       std::shared_ptr<T> pointer =
+//         std::dynamic_pointer_cast<T>(shared_from_this());
+//       CHECK(pointer);
+//       return std::weak_ptr<T>(pointer);
+//     }
 
     int s;
   };
