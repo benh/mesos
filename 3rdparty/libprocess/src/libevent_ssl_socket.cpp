@@ -20,6 +20,7 @@
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 
+#include <process/collect.hpp>
 #include <process/queue.hpp>
 #include <process/socket.hpp>
 
@@ -985,11 +986,19 @@ Future<std::shared_ptr<SocketImpl>> LibeventSSLSocketImpl::accept()
   //
   // We explicitly specify the return type to avoid a type deduction
   // issue in some versions of clang. See MESOS-2943.
-  return accept_queue.get()
-    .then([](const Future<std::shared_ptr<SocketImpl>>& impl)
+  //
+  // NOTE: we use `await()` here so that a caller can discard the call
+  // to accept because `Queue::get()` is not discardable.
+  return await(accept_queue.get())
+    .then([](const Future<Future<std::shared_ptr<SocketImpl>>>& future)
       -> Future<std::shared_ptr<SocketImpl>> {
-      CHECK(!impl.isPending());
-      return impl;
+      CHECK(!future.isPending());
+      if (future.isReady()) {
+        Future<std::shared_ptr<SocketImpl>> impl = future.get();
+        CHECK(!impl.isPending());
+        return impl;
+      }
+      return Failure(stringify(future));
     });
 }
 
