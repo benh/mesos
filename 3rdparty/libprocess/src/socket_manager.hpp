@@ -50,6 +50,12 @@ public:
   // persistent socket.
   Option<int_fd> get_persistent_socket(const UPID& to);
 
+  // Helper for `link` and `send` to attempt to downgrade if the
+  // initial connection fails.
+  Future<Nothing> connect(
+      network::inet::Socket socket,
+      const network::inet::Address& address);
+
   void send(
       Message&& message,
       const network::internal::SocketImpl::Kind& kind =
@@ -84,18 +90,6 @@ private:
   void swap_implementing_socket(
       const network::inet::Socket& from,
       const network::inet::Socket& to);
-
-  // Helper function for link().
-  void link_connect(
-      const Future<Nothing>& future,
-      network::inet::Socket socket,
-      const UPID& to);
-
-  // Helper function for send().
-  void send_connect(
-      const Future<Nothing>& future,
-      network::inet::Socket socket,
-      const network::inet::Address& address);
 
   // Collection of all active sockets (both inbound and outbound).
   hashmap<int_fd, network::inet::Socket> sockets;
