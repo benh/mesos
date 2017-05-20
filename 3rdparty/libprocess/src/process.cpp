@@ -1241,115 +1241,6 @@ void send(Encoder* encoder, Socket socket);
 } // namespace internal {
 
 
-void SocketManager::link_connect(
-    const Future<Nothing>& future,
-    Socket socket,
-    const UPID& to)
-{
-  if (future.isDiscarded() || future.isFailed()) {
-    if (future.isFailed()) {
-      VLOG(1) << "Failed to link, connect: " << future.failure();
-    }
-
-    // Check if SSL is enabled, and whether we allow a downgrade to
-    // non-SSL traffic.
-#ifdef USE_SSL_SOCKET
-    bool attempt_downgrade =
-      future.isFailed() &&
-      network::openssl::flags().enabled &&
-      network::openssl::flags().support_downgrade &&
-      socket.kind() == SocketImpl::Kind::SSL;
-
-    Option<Socket> poll_socket = None();
-
-    // If we allow downgrading from SSL to non-SSL, then retry as a
-    // POLL socket.
-    if (attempt_downgrade) {
-      synchronized (mutex) {
-        // It is possible that a prior call to `link()` with `RECONNECT`
-        // semantics has swapped out this socket before we finished
-        // connecting. In this case, we simply stop here and allow the
-        // latest created socket to complete the link.
-        if (sockets.count(socket) <= 0) {
-          return;
-        }
-
-        Try<Socket> create = Socket::create(SocketImpl::Kind::POLL);
-        if (create.isError()) {
-          VLOG(1) << "Failed to link, create socket: " << create.error();
-          socket_manager->close(socket);
-          return;
-        }
-
-        poll_socket = create.get();
-
-        // Update all the data structures that are mapped to the socket
-        // that just failed to connect. They will now point to the new
-        // POLL socket we are about to try to connect. Even if the
-        // process has exited, persistent links will stay around, and
-        // temporary links will get cleaned up as they would otherwise.
-        swap_implementing_socket(socket, poll_socket.get());
-      }
-
-      CHECK_SOME(poll_socket);
-      poll_socket->connect(to.address)
-        .onAny(lambda::bind(
-            &SocketManager::link_connect,
-            this,
-            lambda::_1,
-            poll_socket.get(),
-            to));
-
-      // We don't need to 'shutdown()' the socket as it was never
-      // connected.
-      return;
-    }
-#endif
-
-    socket_manager->close(socket);
-    return;
-  }
-
-  synchronized (mutex) {
-    // It is possible that a prior call to `link()` with `RECONNECT`
-    // semantics has swapped out this socket before we finished
-    // connecting. In this case, we simply stop here and allow the
-    // latest created socket to complete the link.
-    if (sockets.count(socket) <= 0) {
-      return;
-    }
-
-    size_t size = 80 * 1024;
-    char* data = new char[size];
-
-    socket.recv(data, size)
-      .onAny(lambda::bind(
-          &internal::ignore_recv_data,
-          lambda::_1,
-          socket,
-          data,
-          size));
-  }
-
-  // In order to avoid a race condition where internal::send() is
-  // called after SocketManager::link() but before the socket is
-  // connected, we initialize the 'outgoing' queue in
-  // SocketManager::link() and then check if the queue has anything in
-  // it to send during this connection completion. When a subsequent
-  // call to SocketManager::send() occurs we'll now just add the
-  // encoder to the 'outgoing' queue, and when we complete the
-  // connection here we'll start sending, otherwise when we call
-  // SocketManager::next() the 'outgoing' queue will get removed and
-  // any subsequent call to SocketManager::send() will take care of
-  // setting it back up and sending.
-  Encoder* encoder = socket_manager->next(socket);
-
-  if (encoder != nullptr) {
-    internal::send(encoder, socket);
-  }
-}
-
-
 void SocketManager::link(
     ProcessBase* process,
     const UPID& to,
@@ -1367,7 +1258,7 @@ void SocketManager::link(
   CHECK_NOTNULL(process);
 
   Option<Socket> socket = None();
-  bool connect = false;
+  bool connected = true;
 
   synchronized (mutex) {
     // Check if the socket address is remote.
@@ -1406,7 +1297,7 @@ void SocketManager::link(
         // connected.
         outgoing[s];
 
-        connect = true;
+        connected = false;
       } else if (remote == ProcessBase::RemoteConnection::RECONNECT) {
         // There is a persistent link already and the linker wants to
         // create a new socket anyway.
@@ -1427,7 +1318,7 @@ void SocketManager::link(
         // Update all the data structures that are mapped to the old
         // socket. They will now point to the new socket we are about
         // to try to connect.
-        Socket existing(sockets.at(persists.at(to.address)));
+        Socket existing = sockets.at(persists.at(to.address));
         swap_implementing_socket(existing, socket.get());
 
         // The `existing` socket could be a perfectly functional socket.
@@ -1442,7 +1333,7 @@ void SocketManager::link(
           VLOG(1) << "Failed to shutdown old link: " << shutdown.error();
         }
 
-        connect = true;
+        connected = false;
       }
     }
 
@@ -1453,15 +1344,52 @@ void SocketManager::link(
     }
   }
 
-  if (connect) {
+  if (!connected) {
     CHECK_SOME(socket);
-    socket->connect(to.address)
-      .onAny(lambda::bind(
-          &SocketManager::link_connect,
-          this,
-          lambda::_1,
-          socket.get(),
-          to));
+    // TODO(benh): Capture the future returned from `connect` so that
+    // we can discard it either when we swap the implementing socket
+    // or we shut down SocketManager.
+    connect(socket.get(), to.address)
+      .onReady([=]() {
+        synchronized (mutex) {
+          // It is possible that a prior call to `link()` with
+          // `RECONNECT` semantics has swapped out this socket before
+          // we finished connecting. In this case, we simply stop here
+          // and allow the latest created socket to complete the link.
+          if (sockets.count(socket.get()) <= 0) {
+            return;
+          }
+
+          size_t size = 80 * 1024;
+          char* data = new char[size];
+
+          socket->recv(data, size)
+            .onAny(lambda::bind(
+                &internal::ignore_recv_data,
+                lambda::_1,
+                socket.get(),
+                data,
+                size));
+        }
+
+        // In order to avoid a race condition where internal::send()
+        // is called after SocketManager::link() but before the socket
+        // is connected, we initialize the 'outgoing' queue in
+        // SocketManager::link() and then check if the queue has
+        // anything in it to send during this connection
+        // completion. When a subsequent call to SocketManager::send()
+        // occurs we'll now just add the encoder to the 'outgoing'
+        // queue, and when we complete the connection here we'll start
+        // sending, otherwise when we call SocketManager::next() the
+        // 'outgoing' queue will get removed and any subsequent call
+        // to SocketManager::send() will take care of setting it back
+        // up and sending.
+        Encoder* encoder = next(socket.get());
+
+        if (encoder != nullptr) {
+          internal::send(encoder, socket.get());
+        }
+      });
   }
 }
 
@@ -1561,86 +1489,65 @@ void _send(
 } // namespace internal {
 
 
-void SocketManager::send_connect(
-    const Future<Nothing>& future,
-    Socket socket,
-    Message&& message)
+Future<Nothing> SocketManager::connect(Socket socket, const Address& address)
 {
-  if (future.isDiscarded() || future.isFailed()) {
-    if (future.isFailed()) {
-      VLOG(1) << "Failed to send '" << message.name << "' to '"
-              << message.to.address << "', connect: " << future.failure();
-    }
-
-    // Check if SSL is enabled, and whether we allow a downgrade to
-    // non-SSL traffic.
-#ifdef USE_SSL_SOCKET
-    bool attempt_downgrade =
-      future.isFailed() &&
-      network::openssl::flags().enabled &&
-      network::openssl::flags().support_downgrade &&
-      socket.kind() == SocketImpl::Kind::SSL;
-
-    Option<Socket> poll_socket = None();
-
-    // If we allow downgrading from SSL to non-SSL, then retry as a
-    // POLL socket.
-    if (attempt_downgrade) {
-      synchronized (mutex) {
-        Try<Socket> create = Socket::create(SocketImpl::Kind::POLL);
-        if (create.isError()) {
-          VLOG(1) << "Failed to link, create socket: " << create.error();
-          socket_manager->close(socket);
-          return;
-        }
-
-        poll_socket = create.get();
-
-        // Update all the data structures that are mapped to the socket
-        // that just failed to connect. They will now point to the new
-        // POLL socket we are about to try to connect. Even if the
-        // process has exited, persistent links will stay around, and
-        // temporary links will get cleaned up as they would otherwise.
-        swap_implementing_socket(socket, poll_socket.get());
+  // Try to connect, then attempt downgrade.
+  return socket.connect(address)
+    .recover([=](const Future<Nothing>& future) -> Future<Nothing> {
+      if (future.isAbandoned() || future.isDiscarded()) {
+        close(socket); // Removes the socket from our data structures.
+        return Failure("Abandoned or discarded connect");
       }
 
-      CHECK_SOME(poll_socket);
-      poll_socket.get().connect(message.to.address)
-        .onAny(lambda::bind(
-            // TODO(benh): with C++14 we can use lambda instead of
-            // `std::bind` and capture `message` with a `std::move`.
-            [this, poll_socket](Message& message, const Future<Nothing>& f) {
-              send_connect(f, poll_socket.get(), std::move(message));
-            }, std::move(message), lambda::_1));
+      VLOG(1) << "Failed to connect to '" << address << "': "
+              << future.failure();
 
-      // We don't need to 'shutdown()' the socket as it was never
-      // connected.
-      return;
-    }
-#endif
+#ifdef USE_SSL_SOCKET
+      // Check if SSL is enabled, and whether we allow a downgrade
+      // to non-SSL traffic.
+      if (network::openssl::flags().enabled &&
+          network::openssl::flags().support_downgrade) {
+        synchronized (mutex) {
+          // When this connect was initiated it's possible that the
+          // socket is no longer being used and we should just stop
+          // connecting and let the socket get cleaned up. At the time
+          // of writing this comment this might occur when this
+          // function gets called by `link()` and a subsequent call to
+          // `link()` has occured with `RECONNECT` semantics which
+          // swaps out this socket. In this case, we simply return
+          // here and allow the latest created socket to complete the
+          // link.
+          if (sockets.count(socket) <= 0) {
+            return Failure("Aborting connect as socket is no longer in use");
+          }
+        }
 
-    socket_manager->close(socket);
+        Try<Socket> create = Socket::create(SocketImpl::Kind::POLL);
+        if (create.isError()) {
+          close(socket); // Removes the socket from our data structures.
+          return Failure("Failed to attempt downgrade: "
+                         "Failed to create socket: " + create.error());
+        }
 
-    return;
-  }
+        Socket poll_socket = create.get();
 
-  Encoder* encoder = new MessageEncoder(message);
+        // Update all the data structures that are mapped to the
+        // socket that just failed to connect. They will now point to
+        // the new POLL socket we are about to try to connect. Even if
+        // the process has exited, persistent links will stay around,
+        // and temporary links will get cleaned up as they would
+        // otherwise.
+        swap_implementing_socket(socket, poll_socket);
 
-  // Receive and ignore data from this socket. Note that we don't
-  // expect to receive anything other than HTTP '202 Accepted'
-  // responses which we just ignore.
-  size_t size = 80 * 1024;
-  char* data = new char[size];
+        return poll_socket.connect(address)
+          .then([]() {
+            return Nothing();
+          });
+      }
+#endif // USE_SSL_SOCKET
 
-  socket.recv(data, size)
-    .onAny(lambda::bind(
-        &internal::ignore_recv_data,
-        lambda::_1,
-        socket,
-        data,
-        size));
-
-  internal::send(encoder, socket);
+      return Failure(future.failure());
+    });
 }
 
 
@@ -1649,7 +1556,6 @@ void SocketManager::send(Message&& message, const SocketImpl::Kind& kind)
   const Address& address = message.to.address;
 
   Option<Socket> socket = None();
-  bool connect = false;
 
   synchronized (mutex) {
     // Check if there is already a socket.
@@ -1664,10 +1570,13 @@ void SocketManager::send(Message&& message, const SocketImpl::Kind& kind)
         outgoing[socket.get()].push(new MessageEncoder(message));
         return;
       } else {
-        // Initialize the outgoing queue.
+        // Initialize the outgoing queue (in case it isn't).
         outgoing[socket.get()];
       }
 
+      // If we're not connecting and we haven't added the encoder to
+      // the 'outgoing' queue then schedule it to be sent.
+      internal::send(new MessageEncoder(message), socket.get());
     } else {
       // No persistent or temporary socket to the socket address
       // currently exists, so we create a temporary one.
@@ -1691,23 +1600,32 @@ void SocketManager::send(Message&& message, const SocketImpl::Kind& kind)
       // Initialize the outgoing queue.
       outgoing[s];
 
-      connect = true;
-    }
-  }
-
-  if (connect) {
-    CHECK_SOME(socket);
-    socket->connect(address)
-      .onAny(lambda::bind(
+      // TODO(benh): Capture the future returned from `connect` so
+      // that we can discard it either when we swap the implementing
+      // socket or we shut down SocketManager.
+      connect(socket.get(), address)
+        .onReady(lambda::bind(
             // TODO(benh): with C++14 we can use lambda instead of
             // `std::bind` and capture `message` with a `std::move`.
-            [this, socket](Message& message, const Future<Nothing>& f) {
-              send_connect(f, socket.get(), std::move(message));
-            }, std::move(message), lambda::_1));
-  } else {
-    // If we're not connecting and we haven't added the encoder to
-    // the 'outgoing' queue then schedule it to be sent.
-    internal::send(new MessageEncoder(message), socket.get());
+            [socket](Message& message) {
+              // Receive and ignore data from this socket. Note that
+              // we don't expect to receive anything other than HTTP
+              // '202 Accepted' responses which we just ignore.
+              size_t size = 80 * 1024;
+              char* data = new char[size];
+
+              socket->recv(data, size)
+                .onAny(lambda::bind(
+                    &internal::ignore_recv_data,
+                    lambda::_1,
+                    socket.get(),
+                    data,
+                    size));
+
+              // Now start sending the message.
+              internal::send(new MessageEncoder(message), socket.get());
+            }, std::move(message)));
+    }
   }
 }
 
