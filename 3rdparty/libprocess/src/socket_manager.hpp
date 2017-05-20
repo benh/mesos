@@ -100,11 +100,6 @@ private:
   // Collection of all active sockets (both inbound and outbound).
   hashmap<int_fd, network::inet::Socket> sockets;
 
-  // Collection of sockets that should be disposed when they are
-  // finished being used (e.g., when there is no more data to send on
-  // them). Can contain both inbound and outbound sockets.
-  hashset<int_fd> dispose;
-
   // Map from socket to socket address for outbound sockets.
   hashmap<int_fd, network::inet::Address> addresses;
 
