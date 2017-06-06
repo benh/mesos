@@ -46,7 +46,6 @@ nobase_include_HEADERS =			\
   stout/internal/windows/symlink.hpp		\
   stout/interval.hpp				\
   stout/ip.hpp					\
-  stout/ip46.hpp				\
   stout/json.hpp				\
   stout/jsonify.hpp				\
   stout/lambda.hpp				\

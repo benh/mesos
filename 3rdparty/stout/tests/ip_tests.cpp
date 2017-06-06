@@ -20,14 +20,10 @@
 
 #include <stout/foreach.hpp>
 #include <stout/gtest.hpp>
-#include <stout/ip46.hpp>
 #include <stout/net.hpp>
 #include <stout/numify.hpp>
 #include <stout/stringify.hpp>
 #include <stout/strings.hpp>
-
-namespace inet = net::inet;
-namespace inet6 = net::inet6;
 
 using std::set;
 using std::string;
@@ -81,15 +77,15 @@ TEST(NetTest, ConstructIPv4)
   EXPECT_ERROR(net::IP::parse("hello world", AF_INET));
 
   uint32_t address = 0x01020304;
-  Try<inet::IP> ip4 = inet::IP::parse("1.2.3.4");
+  Try<net::IPv4> ip4 = net::IPv4::parse("1.2.3.4");
   ASSERT_SOME(ip4);
-  EXPECT_EQ(ip4.get(), inet::IP(address));
+  EXPECT_EQ(ip4.get(), net::IPv4(address));
 
-  Try<inet::IP> loopback = inet::IP::parse("127.0.0.1");
+  Try<net::IPv4> loopback = net::IPv4::parse("127.0.0.1");
   ASSERT_SOME(loopback);
   EXPECT_TRUE(loopback->isLoopback());
 
-  Try<inet::IP> any = inet::IP::parse("0.0.0.0");
+  Try<net::IPv4> any = net::IPv4::parse("0.0.0.0");
   ASSERT_SOME(any);
   EXPECT_TRUE(any->isAny());
 
@@ -103,27 +99,27 @@ TEST(NetTest, ConstructIPv6)
 {
   EXPECT_SOME(net::IP::parse("::1", AF_INET6));
   EXPECT_SOME(net::IP::parse("fe80::eef4:bbff:fe33:a9c7", AF_INET6));
-  EXPECT_SOME(inet6::IP::parse("fe80::eef4:bbff:fe33:a9c7"));
+  EXPECT_SOME(net::IPv6::parse("fe80::eef4:bbff:fe33:a9c7"));
   EXPECT_SOME(net::IP::parse("::192.9.5.5", AF_INET6));
-  EXPECT_SOME(inet6::IP::parse("::192.9.5.5"));
+  EXPECT_SOME(net::IPv6::parse("::192.9.5.5"));
 
   EXPECT_ERROR(net::IP::parse("1::1::1", AF_INET6));
-  EXPECT_ERROR(inet6::IP::parse("1::1::1"));
+  EXPECT_ERROR(net::IPv6::parse("1::1::1"));
   EXPECT_ERROR(net::IP::parse("121.2.3.5", AF_INET6));
-  EXPECT_ERROR(inet6::IP::parse("121.2.3.5"));
+  EXPECT_ERROR(net::IPv6::parse("121.2.3.5"));
   EXPECT_ERROR(net::IP::parse("fe80:2:a", AF_INET6));
-  EXPECT_ERROR(inet6::IP::parse("fe80:2:a"));
+  EXPECT_ERROR(net::IPv6::parse("fe80:2:a"));
   EXPECT_ERROR(net::IP::parse("hello world", AF_INET6));
-  EXPECT_ERROR(inet6::IP::parse("hello world"));
+  EXPECT_ERROR(net::IPv6::parse("hello world"));
 
-  Try<inet6::IP> loopback = inet6::IP::parse("::1");
+  Try<net::IPv6> loopback = net::IPv6::parse("::1");
   ASSERT_SOME(loopback);
-  inet6::IP loopback2 = inet6::IP(loopback->in6());
+  net::IPv6 loopback2 = net::IPv6(loopback->in6());
   EXPECT_EQ(loopback2, loopback.get());
   EXPECT_TRUE(loopback2.isLoopback());
   EXPECT_FALSE(loopback2.isAny());
 
-  Try<inet6::IP> any = inet6::IP::parse("::");
+  Try<net::IPv6> any = net::IPv6::parse("::");
   ASSERT_SOME(any);
   EXPECT_TRUE(any->isAny());
   EXPECT_FALSE(any->isLoopback());
