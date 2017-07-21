@@ -42,6 +42,7 @@
 namespace process {
 
 // Forward declaration.
+class EventQueue;
 class Gate;
 class Logging;
 class Sequence;
@@ -380,20 +381,12 @@ protected:
   }
 
   /**
-   * Returns the number of events of the given type currently on the event
-   * queue.
+   * Returns the number of events of the given type currently on the
+   * event queue. MUST be invoked from within the process itself in
+   * order to safely examine events.
    */
   template <typename T>
-  size_t eventCount()
-  {
-    size_t count = 0U;
-
-    synchronized (mutex) {
-      count = std::count_if(events.begin(), events.end(), isEventType<T>);
-    }
-
-    return count;
-  }
+  size_t eventCount();
 
 private:
   friend class SocketManager;
@@ -406,19 +399,15 @@ private:
   // Transitioning from BLOCKED to READY also requires enqueueing the
   // process in the run queue otherwise the events will never be
   // processed!
-  enum
+  enum State
   {
     BOTTOM, // Uninitialized but events may be enqueued.
     BLOCKED, // Initialized, no events enqueued.
     READY, // Initialized, events enqueued.
     TERMINATING // Initialized, no more events will be enqueued.
-  } state;
+  };
 
-  template <typename T>
-  static bool isEventType(const Event* event)
-  {
-    return event->is<T>();
-  }
+  std::atomic<State> state = ATOMIC_VAR_INIT(BOTTOM);
 
   // Mutex protecting internals.
   // TODO(benh): Consider replacing with a spinlock, on multi-core systems.
@@ -477,11 +466,15 @@ private:
       const std::string& name,
       const Owned<http::Request>& request);
 
+  // JSON representation of process. MUST be invoked from within the
+  // process itself in order to safely examine events.
+  operator JSON::Object();
+
   // Static assets(s) to provide.
   std::map<std::string, Asset> assets;
 
-  // Queue of received events, requires lock()ed access!
-  std::deque<Event*> events;
+  // Queue of received events.
+  std::shared_ptr<EventQueue> events;
 
   // Active references.
   std::atomic_long refs;
