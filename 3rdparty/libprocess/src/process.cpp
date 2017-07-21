@@ -3196,8 +3196,8 @@ void ProcessManager::resume(ProcessBase* process)
   while (!terminate && !blocked) {
     Event* event = nullptr;
 
-    if (!process->events->empty()) {
-      event = process->events->dequeue();
+    if (!process->events->consumer.empty()) {
+      event = process->events->consumer.dequeue();
     } else {
       state = ProcessBase::BLOCKED;
       process->state.store(state);
@@ -3207,7 +3207,7 @@ void ProcessManager::resume(ProcessBase* process)
       // before we set ourselves to BLOCKED since we won't have been
       // added to the run queue in those circumstances so we need to
       // serve those events!
-      if (!process->events->empty()) {
+      if (!process->events->consumer.empty()) {
         // Make sure the state is in READY! Either we need to
         // explicitly do this because `ProcessBase::enqueue` saw us as
         // BLOCKED (or BOTTOM) and didn't change the state or we're
@@ -3233,7 +3233,7 @@ void ProcessManager::resume(ProcessBase* process)
       terminate = process->termination.load();
       while (terminate && !event->is<TerminateEvent>()) {
         delete event;
-        event = process->events->dequeue();
+        event = process->events->consumer.dequeue();
         CHECK_NOTNULL(event);
       }
 
@@ -3312,7 +3312,7 @@ void ProcessManager::cleanup(ProcessBase* process)
   // _new_ process that gets spawned with the same PID.
   process->state.store(ProcessBase::TERMINATING);
 
-  process->events->decomission();
+  process->events->consumer.decomission();
 
   // Remove help strings for all installed routes for this process.
   dispatch(help, &Help::remove, process->pid.id);
@@ -3689,7 +3689,7 @@ template <>
 size_t ProcessBase::eventCount<MessageEvent>()
 {
   CHECK_EQ(this, __process__);
-  return events->count<MessageEvent>();
+  return events->consumer.count<MessageEvent>();
 }
 
 
@@ -3697,7 +3697,7 @@ template <>
 size_t ProcessBase::eventCount<DispatchEvent>()
 {
   CHECK_EQ(this, __process__);
-  return events->count<DispatchEvent>();
+  return events->consumer.count<DispatchEvent>();
 }
 
 
@@ -3705,7 +3705,7 @@ template <>
 size_t ProcessBase::eventCount<HttpEvent>()
 {
   CHECK_EQ(this, __process__);
-  return events->count<HttpEvent>();
+  return events->consumer.count<HttpEvent>();
 }
 
 
@@ -3713,7 +3713,7 @@ template <>
 size_t ProcessBase::eventCount<ExitedEvent>()
 {
   CHECK_EQ(this, __process__);
-  return events->count<ExitedEvent>();
+  return events->consumer.count<ExitedEvent>();
 }
 
 
@@ -3721,7 +3721,7 @@ template <>
 size_t ProcessBase::eventCount<TerminateEvent>()
 {
   CHECK_EQ(this, __process__);
-  return events->count<TerminateEvent>();
+  return events->consumer.count<TerminateEvent>();
 }
 
 
@@ -3742,7 +3742,7 @@ void ProcessBase::enqueue(Event* event)
     case BOTTOM:
     case READY:
     case BLOCKED:
-      events->enqueue(event);
+      events->producer.enqueue(event);
       break;
     case TERMINATING:
        delete event;
@@ -4069,7 +4069,7 @@ ProcessBase:: operator JSON::Object()
   CHECK_EQ(this, __process__);
   JSON::Object object;
   object.values["id"] = pid.id;
-  object.values["events"] = JSON::Array(*events);
+  object.values["events"] = JSON::Array(events->consumer);
   return object;
 }
 
