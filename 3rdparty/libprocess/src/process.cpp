@@ -3186,7 +3186,6 @@ void ProcessManager::resume(ProcessBase* process)
         process->state == ProcessBase::READY);
 
   if (process->state == ProcessBase::BOTTOM) {
-    process->state = ProcessBase::RUNNING;
     try { process->initialize(); }
     catch (...) { terminate = true; }
   }
@@ -3198,7 +3197,6 @@ void ProcessManager::resume(ProcessBase* process)
       if (process->events.size() > 0) {
         event = process->events.front();
         process->events.pop_front();
-        process->state = ProcessBase::RUNNING;
       } else {
         process->state = ProcessBase::BLOCKED;
         blocked = true;
@@ -3311,7 +3309,6 @@ void ProcessManager::cleanup(ProcessBase* process)
       processes.erase(process->pid.id);
 
       CHECK(process->refs.load() == 0);
-      process->state = ProcessBase::TERMINATED;
     }
 
     // Note that we don't remove the process from the clock during
@@ -3406,7 +3403,6 @@ bool ProcessManager::wait(const UPID& pid)
   synchronized (processes_mutex) {
     if (processes.count(pid.id) > 0) {
       process = processes[pid.id];
-      CHECK(process->state != ProcessBase::TERMINATED);
 
       gate = process->gate;
 
@@ -3729,7 +3725,7 @@ void ProcessBase::enqueue(Event* event, bool inject)
   CHECK(event != nullptr);
 
   synchronized (mutex) {
-    if (state != TERMINATING && state != TERMINATED) {
+    if (state != TERMINATING) {
       if (!inject) {
         events.push_back(event);
       } else {
@@ -3741,9 +3737,7 @@ void ProcessBase::enqueue(Event* event, bool inject)
         process_manager->enqueue(this);
       }
 
-      CHECK(state == BOTTOM ||
-            state == READY ||
-            state == RUNNING);
+      CHECK(state == BOTTOM || state == READY);
     } else {
       delete event;
     }
