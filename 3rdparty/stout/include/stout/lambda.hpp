@@ -24,6 +24,41 @@ using std::ref;
 
 using namespace std::placeholders;
 
+
+template <
+  template <typename...> class Iterable,
+  typename F,
+  typename U,
+  typename V = typename std::result_of<F(U)>::type>
+Iterable<V> map(F&& f, const Iterable<U>& input)
+{
+  Iterable<V> output;
+  std::transform(
+      input.begin(),
+      input.end(),
+      std::inserter(output, output.begin()),
+      std::forward<F>(f));
+  return output;
+}
+
+
+template <
+  template <typename...> class OutputIterable,
+  template <typename...> class InputIterable,
+  typename F,
+  typename U,
+  typename V = typename std::result_of<F(U)>::type>
+OutputIterable<V> map(F&& f, const InputIterable<U>& input)
+{
+  OutputIterable<V> output;
+  std::transform(
+      input.begin(),
+      input.end(),
+      std::inserter(output, output.begin()),
+      std::forward<F>(f));
+  return output;
+}
+
 } // namespace lambda {
 
 #endif // __STOUT_LAMBDA_HPP__
