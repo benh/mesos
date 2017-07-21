@@ -3227,6 +3227,16 @@ void ProcessManager::resume(ProcessBase* process)
     if (!blocked) {
       CHECK_NOTNULL(event);
 
+      // Before serving this event check if we've triggered a
+      // terminate and if so purge all events until we get to the
+      // terminate event.
+      terminate = process->termination.load();
+      while (terminate && !event->is<TerminateEvent>()) {
+        delete event;
+        event = process->events->dequeue();
+        CHECK_NOTNULL(event);
+      }
+
       // Determine if we should filter this event.
       //
       // NOTE: we use double-checked locking here to avoid
@@ -3395,9 +3405,9 @@ void ProcessManager::terminate(
     }
 
     if (sender != nullptr) {
-      process->enqueue(new TerminateEvent(sender->self()), inject);
+      process->enqueue(new TerminateEvent(sender->self(), inject));
     } else {
-      process->enqueue(new TerminateEvent(UPID()), inject);
+      process->enqueue(new TerminateEvent(UPID(), inject));
     }
   }
 }
@@ -3715,21 +3725,36 @@ size_t ProcessBase::eventCount<TerminateEvent>()
 }
 
 
-void ProcessBase::enqueue(Event* event, bool inject)
+void ProcessBase::enqueue(Event* event)
 {
   CHECK_NOTNULL(event);
 
   State old = state.load();
 
+  // Need to check if this is a terminate event _BEFORE_ we enqueue
+  // because it's possible that it'll get deleted after we enqueue it
+  // and before we use it again!
+  bool terminate =
+    event->is<TerminateEvent>() &&
+    event->as<TerminateEvent>().inject;
+
   switch (old) {
     case BOTTOM:
     case READY:
     case BLOCKED:
-      events->enqueue(event, inject);
+      events->enqueue(event);
       break;
     case TERMINATING:
        delete event;
        return;
+  }
+
+  // We need to store terminate _AFTER_ we enqueue the event because
+  // the code in `ProcessMNager::resume` assumes that if it sees
+  // `termination` as true then there must be at least one event in
+  // the queue.
+  if (terminate) {
+    termination.store(true);
   }
 
   // If we're BLOCKED then we need to try and enqueue us into the run
@@ -3746,21 +3771,6 @@ void ProcessBase::enqueue(Event* event, bool inject)
     // READY.
     process_manager->enqueue(this);
   }
-}
-
-
-void ProcessBase::inject(
-    const UPID& from,
-    const string& name,
-    const char* data,
-    size_t length)
-{
-  if (!from)
-    return;
-
-  Message message = encode(from, pid, name, data, length);
-
-  enqueue(new MessageEvent(std::move(message)), true);
 }
 
 
