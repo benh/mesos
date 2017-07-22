@@ -77,7 +77,7 @@ public:
 
   virtual ~ProcessBase();
 
-  UPID self() const { return pid; }
+  const UPID& self() const { return pid; }
 
 protected:
   /**
@@ -380,7 +380,6 @@ protected:
 private:
   friend class SocketManager;
   friend class ProcessManager;
-  friend class ProcessReference;
   friend void* schedule(void*);
 
   // Process states.
@@ -464,8 +463,9 @@ private:
   // Queue of received events.
   std::shared_ptr<EventQueue> events;
 
-  // Active references.
-  std::atomic_long refs;
+  // NOTE: this is a shared pointer to a _pointer_, hence this is not
+  // responsible for the ProcessBase itself.
+  std::shared_ptr<ProcessBase*> reference;
 
   std::shared_ptr<Gate> gate;
 

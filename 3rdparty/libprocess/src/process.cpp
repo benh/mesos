@@ -2853,19 +2853,22 @@ long ProcessManager::init_threads()
 
 ProcessReference ProcessManager::use(const UPID& pid)
 {
+  if (pid.reference.isSome()) {
+    if (std::shared_ptr<ProcessBase*> reference = pid.reference->lock()) {
+      return ProcessReference(std::move(reference));
+    }
+  }
+
   if (pid.address == __address__) {
     synchronized (processes_mutex) {
       Option<ProcessBase*> process = processes.get(pid.id);
       if (process.isSome()) {
-        // Note that the ProcessReference constructor _must_ get
-        // called while holding the lock on processes so that waiting
-        // for references is atomic (i.e., race free).
-        return ProcessReference(process.get());
+        return ProcessReference(process.get()->reference);
       }
     }
   }
 
-  return ProcessReference(nullptr);
+  return ProcessReference();
 }
 
 
@@ -3122,6 +3125,7 @@ bool ProcessManager::deliver(
   if (ProcessReference receiver = use(to)) {
     return deliver(receiver, event, sender);
   }
+
   VLOG(2) << "Dropping event for process " << to;
 
   delete event;
@@ -3322,8 +3326,16 @@ void ProcessManager::cleanup(ProcessBase* process)
 
   // Remove process.
   synchronized (processes_mutex) {
+    // Reset the reference so that we don't keep giving out references
+    // in `ProcessManager::use`.
+    //
+    // NOTE: this must be done from within the `processes_mutex` since
+    // that is where we read it and this is considered a write.
+    process->reference.reset();
+
     // Wait for all process references to get cleaned up.
-    while (process->refs.load() > 0) {
+    CHECK_SOME(process->pid.reference);
+    while (!process->pid.reference->expired()) {
 #if defined(__i386__) || defined(__x86_64__)
       asm ("pause");
 #endif
@@ -3661,17 +3673,16 @@ ProcessBase::ProcessBase(const string& id)
 {
   process::initialize();
 
-  state = ProcessBase::BOTTOM;
-
   events = std::make_shared<EventQueue>();
 
-  refs = 0;
+  reference = std::make_shared<ProcessBase*>(this);
 
   gate = std::make_shared<Gate>();
 
   pid.id = id != "" ? id : ID::generate();
   pid.address = __address__;
   pid.addresses.v6 = __address6__;
+  pid.reference = reference;
 
   // If using a manual clock, try and set current time of process
   // using happens before relationship between creator (__process__)
@@ -4071,6 +4082,15 @@ ProcessBase:: operator JSON::Object()
   object.values["id"] = pid.id;
   object.values["events"] = JSON::Array(events->consumer);
   return object;
+}
+
+
+void UPID::resolve()
+{
+  if (ProcessReference process = process_manager->use(*this)) {
+    reference = process.reference;
+  }
+  // Otherwise keep it `None` to force look ups in the future!
 }
 
 
