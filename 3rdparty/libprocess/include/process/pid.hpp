@@ -101,7 +101,76 @@ struct UPID
   // to which this UPID refers.
   void resolve();
 
-  std::string id;
+  // A copy-on-write string for performance.
+  //
+  // TODO(benh): Factor this out into a generic copy-on-write string.
+  //
+  // TODO(benh): Really we should store all of the members of UPID
+  // behind a copy-on-write implementation because UPID is often
+  // copied but rarely written which means we could optimize
+  // performance by not making so many copies.
+  struct Id
+  {
+    static const std::string EMPTY;
+
+    Id() = default;
+
+    Id(const std::string& s)
+    {
+      id = std::make_shared<std::string>(s);
+    }
+
+    Id(std::string&& s)
+    {
+      id = std::make_shared<std::string>(std::move(s));
+    }
+
+    Id& operator=(std::string&& that)
+    {
+      id = std::make_shared<std::string>(std::move(that));
+      return *this;
+    }
+
+    bool operator==(const std::string& that) const
+    {
+      if (!id) {
+        return EMPTY == that;
+      }
+      return *id == that;
+    }
+
+    bool operator==(const char* that) const
+    {
+      if (!id) {
+        return EMPTY == that;
+      }
+      return *id == that;
+    }
+
+    bool operator!=(const std::string& that) const
+    {
+      return !(*this == that);
+    }
+
+    bool operator<(const std::string& that) const
+    {
+      if (!id) {
+        return EMPTY < that;
+      }
+      return *id < that;
+    }
+
+    operator const std::string&() const
+    {
+      if (!id) {
+        return EMPTY;
+      }
+      return *id;
+    }
+
+  private:
+    std::shared_ptr<std::string> id;
+  } id;
 
   // TODO(asridharan): Ideally, the following `address` field should be of
   // type `network::Address` so that the default address of the PID
@@ -130,6 +199,37 @@ struct UPID
 
   Option<std::weak_ptr<ProcessBase*>> reference = None();
 };
+
+
+inline std::ostream& operator<<(std::ostream& stream, const UPID::Id& id)
+{
+  const std::string& s = id;
+  return stream << s;
+}
+
+
+inline std::string operator+(const UPID::Id& id, const std::string& s)
+{
+  return (const std::string&) id + s;
+}
+
+
+inline std::string operator+(const UPID::Id& id, std::string&& s)
+{
+  return (const std::string&) id + std::move(s);
+}
+
+
+inline std::string operator+(const std::string& s, const UPID::Id& id)
+{
+  return s + (const std::string&) id;
+}
+
+
+inline std::string operator+(std::string&& s, const UPID::Id& id)
+{
+  return std::move(s) + (const std::string&) id;
+}
 
 
 /**
@@ -201,7 +301,7 @@ struct hash<process::UPID>
   result_type operator()(const argument_type& upid) const
   {
     size_t seed = 0;
-    boost::hash_combine(seed, upid.id);
+    boost::hash_combine(seed, (const std::string&) upid.id);
     boost::hash_combine(seed, std::hash<net::IP>()(upid.address.ip));
     boost::hash_combine(seed, upid.address.port);
     return seed;
