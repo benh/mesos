@@ -2829,6 +2829,11 @@ long ProcessManager::init_threads()
     }
   }
 
+  if (num_worker_threads > (long) runq.capacity()) {
+    EXIT(EXIT_FAILURE) << "Can not use more than " << runq.capacity()
+                       << " worker threads at this time";
+  }
+
   threads.reserve(num_worker_threads + 1);
 
   // Create processing threads.

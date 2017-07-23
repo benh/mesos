@@ -100,6 +100,11 @@ public:
     semaphore.decomission();
   }
 
+  size_t capacity() const
+  {
+    return semaphore.capacity();
+  }
+
   // Epoch used to capture changes to the run queue when settling.
   std::atomic_long epoch = ATOMIC_VAR_INIT(0L);
 
@@ -108,7 +113,7 @@ private:
   std::mutex mutex;
 
   // Semaphore used for threads to wait.
-  DecomissionableKernelSemaphore semaphore;
+  DecomissionableFixedSizeLastInFirstOutSemaphore semaphore;
 };
 
 #else // LOCK_FREE_RUN_QUEUE
@@ -162,6 +167,11 @@ public:
     semaphore.decomission();
   }
 
+  size_t capacity() const
+  {
+    return semaphore.capacity();
+  }
+
   // Epoch used to capture changes to the run queue when settling.
   std::atomic_long epoch = ATOMIC_VAR_INIT(0L);
 
@@ -169,7 +179,7 @@ private:
   moodycamel::ConcurrentQueue<ProcessBase*> queue;
 
   // Semaphore used for threads to wait for the queue.
-  DecomissionableKernelSemaphore semaphore;
+  DecomissionableFixedSizeLastInFirstOutSemaphore semaphore;
 };
 
 #endif // LOCK_FREE_RUN_QUEUE
