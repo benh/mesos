@@ -547,6 +547,12 @@ PID<Logging> logging();
 
 
 /**
+ * Returns the number of worker threads the library has created.
+ */
+long workers();
+
+
+/**
  * Spawn a new process.
  *
  * @param process Process to be spawned.
