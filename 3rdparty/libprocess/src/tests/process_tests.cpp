@@ -1314,11 +1314,9 @@ TEST(ProcessTest, THREADSAFE_Http1)
   request.method = "POST";
   request.url = url;
   request.headers["User-Agent"] = "libprocess/" + stringify(from);
+  request.keepAlive = true;
   request.body = "hello world";
 
-  // Send the libprocess request. Note that we will not
-  // receive a 202 due to the use of the `User-Agent`
-  // header, therefore we need to explicitly disconnect!
   Future<http::Response> response = connection.send(request);
 
   AWAIT_READY(body);
@@ -1327,7 +1325,10 @@ TEST(ProcessTest, THREADSAFE_Http1)
   AWAIT_READY(pid);
   ASSERT_EQ(from, pid.get());
 
-  EXPECT_TRUE(response.isPending());
+  AWAIT_READY(response);
+  ASSERT_EQ(http::Status::ACCEPTED, response->code);
+  ASSERT_EQ(http::Status::string(http::Status::ACCEPTED),
+            response->status);
 
   AWAIT_READY(connection.disconnect());
 
@@ -1712,14 +1713,16 @@ TEST(ProcessTest, PercentEncodedURLs)
   request.method = "POST";
   request.url = url;
   request.headers["User-Agent"] = "libprocess/" + stringify(from);
+  request.keepAlive = true;
 
-  // Send the libprocess request. Note that we will not
-  // receive a 202 due to the use of the `User-Agent`
-  // header, therefore we need to explicitly disconnect!
   Future<http::Response> response = connection.send(request);
 
   AWAIT_READY(handler1);
-  EXPECT_TRUE(response.isPending());
+
+  AWAIT_READY(response);
+  ASSERT_EQ(http::Status::ACCEPTED, response->code);
+  ASSERT_EQ(http::Status::string(http::Status::ACCEPTED),
+            response->status);
 
   AWAIT_READY(connection.disconnect());
 
