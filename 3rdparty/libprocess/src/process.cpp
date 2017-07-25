@@ -114,7 +114,6 @@
 #include "encoder.hpp"
 #include "event_loop.hpp"
 #include "gate.hpp"
-#include "http_proxy.hpp"
 #include "process_reference.hpp"
 #include "socket_manager.hpp"
 #include "run_queue.hpp"
@@ -456,25 +455,16 @@ static std::atomic_bool initialize_started(false);
 static std::atomic_bool initialize_complete(false);
 
 // Server socket listen backlog.
-static const int LISTEN_BACKLOG = 500000;
-
-// Local server socket.
-static Socket* __s__ = nullptr;
-
-// This mutex is only used to prevent a race between the `on_accept`
-// callback loop and closing/deleting `__s__` in `process::finalize`.
-static std::mutex* socket_mutex = new std::mutex();
-
-// The future returned by the last call to `__s__->accept()`.
-// This is used in `process::finalize` to explicitly terminate the
-// `__s__` socket's callback loop.
-static Future<Socket> future_accept;
+static const size_t LISTEN_BACKLOG = 500000;
 
 // Local socket address.
 static inet::Address __address__ = inet4::Address::ANY_ANY();
 
 // Local IPv6 socket address.
 static Option<inet6::Address> __address6__ = None();
+
+// Server.
+static http::Server* server = nullptr;
 
 // Active SocketManager (eventually will probably be thread-local).
 //
@@ -714,79 +704,6 @@ static Future<MessageEvent*> parse(const Request& request)
 }
 
 
-namespace internal {
-
-void decode_recv(
-    const Future<size_t>& length,
-    char* data,
-    size_t size,
-    Socket socket,
-    StreamingRequestDecoder* decoder)
-{
-  if (length.isDiscarded() || length.isFailed()) {
-    if (length.isFailed()) {
-      VLOG(1) << "Decode failure: " << length.failure();
-    }
-
-    socket_manager->close(socket);
-    delete[] data;
-    delete decoder;
-    return;
-  }
-
-  if (length.get() == 0) {
-    socket_manager->close(socket);
-    delete[] data;
-    delete decoder;
-    return;
-  }
-
-  // Decode as much of the data as possible into HTTP requests.
-  const deque<Request*> requests = decoder->decode(data, length.get());
-
-  if (requests.empty() && decoder->failed()) {
-     VLOG(1) << "Decoder error while receiving";
-     socket_manager->close(socket);
-     delete[] data;
-     delete decoder;
-     return;
-  }
-
-  if (!requests.empty()) {
-    // Get the peer address to augment the requests.
-    Try<Address> address = socket.peer();
-
-    if (address.isError()) {
-      VLOG(1) << "Failed to get peer address while receiving: "
-              << address.error();
-      socket_manager->close(socket);
-      delete[] data;
-      delete decoder;
-      return;
-    }
-
-    PID<HttpProxy> proxy = socket_manager->proxy(socket);
-
-    foreach (Request* request, requests) {
-      request->client = address.get();
-
-      Future<Response> response = process_manager->handle(
-          socket,
-          Request(*request));
-
-      // Enqueue the response with the HttpProxy so that it respects
-      // the order of requests to account for HTTP/1.1 pipelining.
-      dispatch(proxy, &HttpProxy::handle, response, *request);
-    }
-  }
-
-  socket.recv(data, size)
-    .onAny(lambda::bind(&decode_recv, lambda::_1, data, size, socket, decoder));
-}
-
-} // namespace internal {
-
-
 void timedout(const list<Timer>& timers)
 {
   // Update current time of process (if it's present/valid). Note that
@@ -823,44 +740,6 @@ void timedout(const list<Timer>& timers)
 //   sigaction(signal, &sa, nullptr);
 //   raise(signal);
 // }
-
-
-namespace internal {
-
-void on_accept(const Future<Socket>& socket)
-{
-  if (socket.isReady()) {
-    // Inform the socket manager for proper bookkeeping.
-    socket_manager->accepted(socket.get());
-
-    const size_t size = 80 * 1024;
-    char* data = new char[size];
-
-    StreamingRequestDecoder* decoder = new StreamingRequestDecoder();
-
-    socket.get().recv(data, size)
-      .onAny(lambda::bind(
-          &internal::decode_recv,
-          lambda::_1,
-          data,
-          size,
-          socket.get(),
-          decoder));
-  } else {
-     LOG(INFO) << "Failed to accept socket: "
-               << (socket.isFailed() ? socket.failure() : "future discarded");
-  }
-
-  // NOTE: `__s__` may be cleaned up during `process::finalize`.
-  synchronized (socket_mutex) {
-    if (__s__ != nullptr) {
-      future_accept = __s__->accept()
-        .onAny(lambda::bind(&on_accept, lambda::_1));
-    }
-  }
-}
-
-} // namespace internal {
 
 
 namespace firewall {
@@ -1024,18 +903,17 @@ bool initialize(
   }
 
   // Create a "server" socket for communicating.
-  Try<Socket> create = Socket::create();
-  if (create.isError()) {
-    LOG(FATAL) << "Failed to construct server socket:" << create.error();
+  Try<Socket> socket = Socket::create();
+  if (socket.isError()) {
+    LOG(FATAL) << "Failed to construct server socket:" << socket.error();
   }
-  __s__ = new Socket(create.get());
 
   // Allow address reuse.
   // NOTE: We cast to `char*` here because the function prototypes on Windows
   // use `char*` instead of `void*`.
   int on = 1;
   if (::setsockopt(
-          __s__->get(),
+          socket->get(),
           SOL_SOCKET,
           SO_REUSEADDR,
           reinterpret_cast<char*>(&on),
@@ -1043,7 +921,7 @@ bool initialize(
     PLOG(FATAL) << "Failed to initialize, setsockopt(SO_REUSEADDR)";
   }
 
-  Try<Address> bind = __s__->bind(__address__);
+  Try<Address> bind = socket->bind(__address__);
   if (bind.isError()) {
     LOG(FATAL) << "Failed to initialize: " << bind.error();
   }
@@ -1082,17 +960,9 @@ bool initialize(
     __address__.ip = ip.get();
   }
 
-  Try<Nothing> listen = __s__->listen(LISTEN_BACKLOG);
-  if (listen.isError()) {
-    LOG(FATAL) << "Failed to initialize: " << listen.error();
-  }
-
   // Need to set `initialize_complete` here so that we can actually
-  // invoke `accept()` and `spawn()` below.
+  // invoke `spawn()` and other calls below.
   initialize_complete.store(true);
-
-  future_accept = __s__->accept()
-    .onAny(lambda::bind(&internal::on_accept, lambda::_1));
 
   // TODO(benh): Make sure creating the garbage collector, logging
   // process, and profiler always succeeds and use supervisors to make
@@ -1168,6 +1038,38 @@ bool initialize(
 
   processes_route = new Route("/__processes__", None(), __processes__);
 
+  // Start the HTTP server for accepting connections and handling
+  // incoming requests.
+  http::Scheme scheme = http::Scheme::HTTP;
+
+#ifdef USE_SSL_SOCKET
+  if (network::openssl::flags().enabled) {
+    CHECK(socket->kind() == network::internal::SocketImpl::Kind::SSL);
+    scheme = http::Scheme::HTTPS;
+  }
+#endif
+
+  Try<http::Server> create = http::Server::create(
+      socket.get(),
+      [&](const network::Socket& socket, const http::Request& request) {
+        return process_manager->handle(socket, Request(request));
+      },
+      { .scheme = scheme, .backlog = LISTEN_BACKLOG, });
+
+  if (create.isError()) {
+    LOG(FATAL) << "Failed to construct server: " << create.error();
+  }
+
+  server = new http::Server(std::move(create.get()));
+
+  server->run()
+    .onDiscarded([]() {
+      LOG(FATAL) << "HTTP server discarded";
+    })
+    .onFailed([](const string& failure) {
+      LOG(FATAL) << "HTTP server failed: " << failure;
+    });
+
   VLOG(1) << "libprocess is initialized on " << address() << " with "
           << num_worker_threads << " worker threads";
 
@@ -1192,17 +1094,10 @@ void finalize(bool finalize_wsa)
   delete processes_route;
   processes_route = nullptr;
 
-  // Close the server socket.
-  // This will prevent any further connections managed by the `SocketManager`.
-  synchronized (socket_mutex) {
-    // Explicitly terminate the callback loop used to accept incoming
-    // connections. This is necessary as the server socket ignores
-    // most errors, including when the server socket has been closed.
-    future_accept.discard();
-
-    delete __s__;
-    __s__ = nullptr;
-  }
+  // Prevent any further calls into `ProcessManager` from HTTP server.
+  server->stop(); // TODO(benh): Await for `shutdown` to complete?
+  delete server;
+  server = nullptr;
 
   // Terminate all running processes and prevent further processes from
   // being spawned. This will also clean up any metadata for running
@@ -1221,8 +1116,7 @@ void finalize(bool finalize_wsa)
 
   // Clean up the socket manager.
   // Terminating processes above will also clean up any links between
-  // processes (which may be expressed as open sockets) and the various
-  // `HttpProxy` processes managing incoming HTTP requests. We cannot
+  // processes (which may be expressed as open sockets). We cannot
   // delete the `SocketManager` yet, since the `ProcessManager` may
   // potentially dereference it.
   socket_manager->finalize();
@@ -1287,17 +1181,11 @@ PID<Logging> logging()
 
 SocketManager::SocketManager() {}
 
-
 SocketManager::~SocketManager() {}
 
 
 void SocketManager::finalize()
 {
-  // We require the `SocketManager` to be finalized after the server socket
-  // has been closed. This means that no further incoming sockets will be
-  // given to the `SocketManager` at this point.
-  CHECK(__s__ == nullptr);
-
   // We require all processes to be terminated prior to finalizing the
   // `SocketManager`. This simplifies the finalization logic as we do not
   // have to worry about sockets or links being created during cleanup.
@@ -1318,15 +1206,6 @@ void SocketManager::finalize()
       close(socket);
     }
   } while (socket >= 0);
-}
-
-
-void SocketManager::accepted(const Socket& socket)
-{
-  synchronized (mutex) {
-    CHECK(sockets.count(socket) == 0);
-    sockets.emplace(socket, socket);
-  }
 }
 
 
@@ -1610,52 +1489,6 @@ Option<int_fd> SocketManager::get_persistent_socket(const UPID& to)
 }
 
 
-PID<HttpProxy> SocketManager::proxy(const Socket& socket)
-{
-  HttpProxy* proxy = nullptr;
-
-  synchronized (mutex) {
-    // This socket might have been asked to get closed (e.g., remote
-    // side hang up) while a process is attempting to handle an HTTP
-    // request. Thus, if there is no more socket, return an empty PID.
-    if (sockets.count(socket) > 0) {
-      if (proxies.count(socket) > 0) {
-        return proxies[socket]->self();
-      } else {
-        proxy = new HttpProxy(sockets.at(socket));
-        proxies[socket] = proxy;
-      }
-    }
-  }
-
-  // Now check if we need to spawn a newly created proxy. Note that we
-  // need to do this outside of the synchronized block above to avoid
-  // a possible deadlock (because spawn eventually synchronizes on
-  // ProcessManager and ProcessManager::cleanup synchronizes on
-  // ProcessManager and then SocketManager, so a deadlock results if
-  // we do spawn within the synchronized block above).
-  if (proxy != nullptr) {
-    return spawn(proxy, true);
-  }
-
-  return PID<HttpProxy>();
-}
-
-
-void SocketManager::unproxy(const Socket& socket)
-{
-  synchronized (mutex) {
-    auto proxy = proxies.find(socket);
-
-    // NOTE: We may have already removed this proxy if the associated
-    // `HttpProxy` was destructed via `SocketManager::close`.
-    if (proxy != proxies.end()) {
-      proxies.erase(proxy);
-    }
-  }
-}
-
-
 namespace internal {
 
 void _send(
@@ -1726,57 +1559,6 @@ void _send(
 }
 
 } // namespace internal {
-
-
-void SocketManager::send(Encoder* encoder, bool persist, const Socket& socket)
-{
-  CHECK(encoder != nullptr);
-
-  synchronized (mutex) {
-    if (sockets.count(socket) > 0) {
-      // Update whether or not this socket should get disposed after
-      // there is no more data to send.
-      if (!persist) {
-        dispose.insert(socket);
-      }
-
-      if (outgoing.count(socket) > 0) {
-        outgoing[socket].push(encoder);
-        encoder = nullptr;
-      } else {
-        // Initialize the outgoing queue.
-        outgoing[socket];
-      }
-    } else {
-      VLOG(1) << "Attempting to send on a no longer valid socket!";
-      delete encoder;
-      encoder = nullptr;
-    }
-  }
-
-  if (encoder != nullptr) {
-    internal::send(encoder, socket);
-  }
-}
-
-
-void SocketManager::send(
-    const Response& response,
-    const Request& request,
-    const Socket& socket)
-{
-  bool persist = request.keepAlive;
-
-  // Don't persist the connection if the headers include
-  // 'Connection: close'.
-  if (response.headers.contains("Connection")) {
-    if (response.headers.get("Connection").get() == "close") {
-      persist = false;
-    }
-  }
-
-  send(new HttpResponseEncoder(response, request), persist, socket);
-}
 
 
 void SocketManager::send_connect(
@@ -1940,8 +1722,6 @@ void SocketManager::send(Message&& message, const SocketImpl::Kind& kind)
 
 Encoder* SocketManager::next(int_fd s)
 {
-  HttpProxy* proxy = nullptr; // Non-null if needs to be terminated.
-
   synchronized (mutex) {
     // We cannot assume 'sockets.count(s) > 0' here because it's
     // possible that 's' has been removed with a call to
@@ -1979,11 +1759,6 @@ Encoder* SocketManager::next(int_fd s)
             addresses.erase(s);
           }
 
-          if (proxies.count(s) > 0) {
-            proxy = proxies[s];
-            proxies.erase(s);
-          }
-
           dispose.erase(s);
 
           auto iterator = sockets.find(s);
@@ -2012,21 +1787,12 @@ Encoder* SocketManager::next(int_fd s)
     }
   }
 
-  // We terminate the proxy outside the synchronized block to avoid
-  // possible deadlock between the ProcessManager and SocketManager
-  // (see comment in SocketManager::proxy for more information).
-  if (proxy != nullptr) {
-    terminate(proxy);
-  }
-
   return nullptr;
 }
 
 
 void SocketManager::close(int_fd s)
 {
-  Option<UPID> proxy; // Some if an `HttpProxy` needs to be terminated.
-
   synchronized (mutex) {
     // This socket might not be active if it was already asked to get
     // closed (e.g., a write on the socket failed so we try and close
@@ -2060,12 +1826,6 @@ void SocketManager::close(int_fd s)
         addresses.erase(s);
       }
 
-      // Clean up any proxy associated with this socket.
-      if (proxies.count(s) > 0) {
-        proxy = proxies.at(s)->self();
-        proxies.erase(s);
-      }
-
       dispose.erase(s);
       auto iterator = sockets.find(s);
 
@@ -2096,26 +1856,21 @@ void SocketManager::close(int_fd s)
     }
   }
 
-  // We terminate the proxy outside the synchronized block to avoid
-  // possible deadlock between the ProcessManager and SocketManager.
-  if (proxy.isSome()) {
-    terminate(proxy.get());
-  }
-
   // Note that we don't actually:
   //
   //   close(s);
   //
-  // Because, for example, there could be a race between an HttpProxy
-  // trying to do send a response with SocketManager::send() or a
-  // process might be responding to another Request (e.g., trying
-  // to do a sendfile) since these things may be happening
-  // asynchronously we can't close the socket yet, because it might
-  // get reused before any of the above things have finished, and then
-  // we'll end up sending data on the wrong socket! Instead, we rely
-  // on the last reference of our Socket object to close the
-  // socket. Note, however, that since socket is no longer in
-  // 'sockets' any attempt to send with it will just get ignored.
+  // Because, for example, there could be a race between trying to do
+  // send a response with SocketManager::send() or a process might be
+  // responding to another Request (e.g., trying to do a sendfile)
+  // since these things may be happening asynchronously we can't close
+  // the socket yet, because it might get reused before any of the
+  // above things have finished, and then we'll end up sending data on
+  // the wrong socket! Instead, we rely on the last reference of our
+  // Socket object to close the socket. Note, however, that since
+  // socket is no longer in 'sockets' any attempt to send with it will
+  // just get ignored.
+  //
   // TODO(benh): Always do a 'shutdown(s, SHUT_RDWR)' since that
   // should keep the file descriptor valid until the last Socket
   // reference does a close but force all event loop watchers to stop?
@@ -2264,12 +2019,6 @@ void SocketManager::swap_implementing_socket(
     // Move any encoders queued against this link to the new socket.
     outgoing[to_fd] = std::move(outgoing[from_fd]);
     outgoing.erase(from_fd);
-
-    // Update the fd any proxies are associated with.
-    if (proxies.count(from_fd) > 0) {
-      proxies[to_fd] = proxies[from_fd];
-      proxies.erase(from_fd);
-    }
   }
 }
 

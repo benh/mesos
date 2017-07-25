@@ -168,8 +168,6 @@ libprocess_la_SOURCES =		\
   src/gate.hpp			\
   src/help.cpp			\
   src/http.cpp			\
-  src/http_proxy.cpp		\
-  src/http_proxy.hpp		\
   src/io.cpp			\
   src/latch.cpp			\
   src/logging.cpp		\

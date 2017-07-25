@@ -43,8 +43,6 @@ set(PROCESS_SRC
   gate.hpp
   help.cpp
   http.cpp
-  http_proxy.cpp
-  http_proxy.hpp
   io.cpp
   latch.cpp
   logging.cpp
