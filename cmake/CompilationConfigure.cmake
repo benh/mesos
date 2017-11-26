@@ -105,6 +105,11 @@ option(
   FALSE)
 
 option(
+  ENABLE_HTTP_SERVER
+  "Build libprocess using http::Server."
+  FALSE)
+
+option(
   ENABLE_NEW_CLI
   "Build the new CLI instead of the old one."
   FALSE)
@@ -486,6 +491,11 @@ endif ()
 if (ENABLE_SSL)
   # TODO(andschwa): Make this non-global.
   add_definitions(-DUSE_SSL_SOCKET=1)
+endif ()
+
+if (ENABLE_HTTP_SERVER)
+  # TODO(andschwa): Make this non-global.
+  add_definitions(-DUSE_HTTP_SERVER=1)
 endif ()
 
 # Calculate some build information.
