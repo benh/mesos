@@ -1501,25 +1501,25 @@ private:
 
     process::Future<process::http::Response> __updateMaintenanceSchedule(
         const mesos::maintenance::Schedule& schedule,
-        const process::Owned<ObjectApprover>& approver) const;
+        const process::Owned<ObjectApprovers>& approvers) const;
 
     process::Future<process::http::Response> ___updateMaintenanceSchedule(
         const mesos::maintenance::Schedule& schedule,
         bool applied) const;
 
     mesos::maintenance::Schedule _getMaintenanceSchedule(
-        const process::Owned<ObjectApprover>& approver) const;
+        const process::Owned<ObjectApprovers>& approvers) const;
 
     process::Future<mesos::maintenance::ClusterStatus> _getMaintenanceStatus(
-        const process::Owned<ObjectApprover>& approver) const;
+        const process::Owned<ObjectApprovers>& approvers) const;
 
     process::Future<process::http::Response> _startMaintenance(
         const google::protobuf::RepeatedPtrField<MachineID>& machineIds,
-        const process::Owned<ObjectApprover>& approver) const;
+        const process::Owned<ObjectApprovers>& approvers) const;
 
     process::Future<process::http::Response> _stopMaintenance(
         const google::protobuf::RepeatedPtrField<MachineID>& machineIds,
-        const process::Owned<ObjectApprover>& approver) const;
+        const process::Owned<ObjectApprovers>& approvers) const;
 
     process::Future<process::http::Response> _reserve(
         const SlaveID& slaveId,

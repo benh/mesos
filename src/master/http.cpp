@@ -125,6 +125,13 @@ using std::tuple;
 using std::vector;
 
 using mesos::authorization::createSubject;
+using mesos::authorization::GET_MAINTENANCE_SCHEDULE;
+using mesos::authorization::GET_MAINTENANCE_STATUS;
+using mesos::authorization::MARK_AGENT_GONE;
+using mesos::authorization::SET_LOG_LEVEL;
+using mesos::authorization::START_MAINTENANCE;
+using mesos::authorization::STOP_MAINTENANCE;
+using mesos::authorization::UPDATE_MAINTENANCE_SCHEDULE;
 using mesos::authorization::VIEW_EXECUTOR;
 using mesos::authorization::VIEW_FLAGS;
 using mesos::authorization::VIEW_FRAMEWORK;
@@ -2065,28 +2072,17 @@ Future<Response> Master::Http::setLoggingLevel(
   Duration duration =
     Nanoseconds(call.set_logging_level().duration().nanoseconds());
 
-  Future<Owned<ObjectApprover>> approver;
+  return ObjectApprovers::create(
+      master->authorizer,
+      principal,
+      {SET_LOG_LEVEL})
+    .then([level, duration](const Owned<ObjectApprovers>& approvers)
+        -> Future<Response> {
+      if (!approvers->approved<SET_LOG_LEVEL>()) {
+        return Forbidden();
+      }
 
-  if (master->authorizer.isSome()) {
-    Option<authorization::Subject> subject = createSubject(principal);
-
-    approver = master->authorizer.get()->getObjectApprover(
-        subject, authorization::SET_LOG_LEVEL);
-  } else {
-    approver = Owned<ObjectApprover>(new AcceptingObjectApprover());
-  }
-
-  return approver.then([level, duration](const Owned<ObjectApprover>& approver)
-      -> Future<Response> {
-    Try<bool> approved = approver->approved((ObjectApprover::Object()));
-
-    if (approved.isError()) {
-      return InternalServerError("Authorization error: " + approved.error());
-    } else if (!approved.get()) {
-      return Forbidden();
-    }
-
-    return dispatch(process::logging(), &Logging::set_level, level, duration)
+      return dispatch(process::logging(), &Logging::set_level, level, duration)
         .then([]() -> Response {
           return OK();
         });
@@ -3345,9 +3341,12 @@ Future<vector<string>> Master::Http::_roles(
     rolesApprover = Owned<ObjectApprover>(new AcceptingObjectApprover());
   }
 
-  return rolesApprover
+  return ObjectApprovers::create(
+      master->authorizer,
+      principal,
+      {VIEW_ROLE})
     .then(defer(master->self(),
-        [this](const Owned<ObjectApprover>& rolesApprover)
+        [this](const Owned<ObjectApprovers>& approvers)
           -> vector<string> {
       JSON::Object object;
 
@@ -3380,7 +3379,7 @@ Future<vector<string>> Master::Http::_roles(
       filteredRoleList.reserve(roleList.size());
 
       foreach (const string& role, roleList) {
-        if (approveViewRole(rolesApprover, role)) {
+        if (approvers->approved<VIEW_ROLE>(role)) {
           filteredRoleList.push_back(role);
         }
       }
@@ -3799,7 +3798,6 @@ Future<Response> Master::Http::tasks(
     .then(defer(
         master->self(),
         [=](const Owned<ObjectApprovers>& approvers) -> Response {
-
           IDAcceptor<FrameworkID> selectFrameworkId(
               request.url.query.get("framework_id"));
 
@@ -4052,25 +4050,17 @@ Future<Response> Master::Http::maintenanceSchedule(
 
   // JSON-ify and return the current maintenance schedule.
   if (request.method == "GET") {
-    Future<Owned<ObjectApprover>> approver;
-
-    if (master->authorizer.isSome()) {
-      Option<authorization::Subject> subject = createSubject(principal);
-
-      approver = master->authorizer.get()->getObjectApprover(
-          subject, authorization::GET_MAINTENANCE_SCHEDULE);
-    } else {
-      approver = Owned<ObjectApprover>(new AcceptingObjectApprover());
-    }
-
     Option<string> jsonp = request.url.query.get("jsonp");
 
-    return approver.then(defer(
+    return ObjectApprovers::create(
+        master->authorizer,
+        principal,
+        {GET_MAINTENANCE_SCHEDULE})
+      .then(defer(
         master->self(),
-        [this, jsonp](
-            const Owned<ObjectApprover>& approver) -> Future<Response> {
+        [this, jsonp](const Owned<ObjectApprovers>& approvers) -> Response {
           const mesos::maintenance::Schedule schedule =
-            _getMaintenanceSchedule(approver);
+            _getMaintenanceSchedule(approvers);
           return OK(JSON::protobuf(schedule), jsonp);
         }));
   }
@@ -4094,7 +4084,7 @@ Future<Response> Master::Http::maintenanceSchedule(
 
 
 mesos::maintenance::Schedule Master::Http::_getMaintenanceSchedule(
-    const Owned<ObjectApprover>& approver) const
+    const Owned<ObjectApprovers>& approvers) const
 {
   // TODO(josephw): Return more than one schedule.
   if (master->maintenance.schedules.empty()) {
@@ -4108,17 +4098,7 @@ mesos::maintenance::Schedule Master::Http::_getMaintenanceSchedule(
     mesos::maintenance::Window window_;
 
     foreach (const MachineID& machine_id, window.machine_ids()) {
-      Try<bool> approved =
-        approver->approved(ObjectApprover::Object(machine_id));
-
-      if (approved.isError()) {
-        LOG(WARNING) << "Error during MachineID authorization: "
-                     << approved.error();
-        // TODO(arojas): Consider exposing these errors to the caller.
-        continue;
-      }
-
-      if (!approved.get()) {
+      if (!approvers->approved<GET_MAINTENANCE_SCHEDULE>(machine_id)) {
         continue;
       }
 
@@ -4149,35 +4129,24 @@ Future<Response> Master::Http::_updateMaintenanceSchedule(
     return BadRequest(isValid.error());
   }
 
-  Future<Owned<ObjectApprover>> approver;
-
-  if (master->authorizer.isSome()) {
-    Option<authorization::Subject> subject = createSubject(principal);
-
-    approver = master->authorizer.get()->getObjectApprover(
-        subject, authorization::UPDATE_MAINTENANCE_SCHEDULE);
-  } else {
-    approver = Owned<ObjectApprover>(new AcceptingObjectApprover());
-  }
-
-  return approver.then(defer(
+  return ObjectApprovers::create(
+      master->authorizer,
+      principal,
+      {UPDATE_MAINTENANCE_SCHEDULE})
+    .then(defer(
       master->self(),
-      [this, schedule](const Owned<ObjectApprover>& approver) {
-        return __updateMaintenanceSchedule(schedule, approver);
+      [this, schedule](const Owned<ObjectApprovers>& approvers) {
+        return __updateMaintenanceSchedule(schedule, approvers);
       }));
 }
 
 Future<Response> Master::Http::__updateMaintenanceSchedule(
     const mesos::maintenance::Schedule& schedule,
-    const Owned<ObjectApprover>& approver) const
+    const Owned<ObjectApprovers>& approvers) const
 {
   foreach (const mesos::maintenance::Window& window, schedule.windows()) {
     foreach (const MachineID& machine, window.machine_ids()) {
-      Try<bool> approved = approver->approved(ObjectApprover::Object(machine));
-
-      if (approved.isError()) {
-        return InternalServerError("Authorization error: " + approved.error());
-      } else if (!approved.get()) {
+      if (!approvers->approved<UPDATE_MAINTENANCE_SCHEDULE>(machine)) {
         return Forbidden();
       }
     }
@@ -4274,27 +4243,19 @@ Future<Response> Master::Http::getMaintenanceSchedule(
 {
   CHECK_EQ(mesos::master::Call::GET_MAINTENANCE_SCHEDULE, call.type());
 
-  Future<Owned<ObjectApprover>> approver;
-
-  if (master->authorizer.isSome()) {
-    Option<authorization::Subject> subject = createSubject(principal);
-
-    approver = master->authorizer.get()->getObjectApprover(
-        subject, authorization::GET_MAINTENANCE_SCHEDULE);
-  } else {
-    approver = Owned<ObjectApprover>(new AcceptingObjectApprover());
-  }
-
-  return approver.then(defer(
+  return ObjectApprovers::create(
+      master->authorizer,
+      principal,
+      {GET_MAINTENANCE_SCHEDULE})
+    .then(defer(
       master->self(),
-      [this, contentType](
-          const Owned<ObjectApprover>& approver) -> Future<Response> {
+      [this, contentType](const Owned<ObjectApprovers>& approvers) -> Response {
         mesos::master::Response response;
 
         response.set_type(mesos::master::Response::GET_MAINTENANCE_SCHEDULE);
 
         response.mutable_get_maintenance_schedule()->mutable_schedule()
-          ->CopyFrom(_getMaintenanceSchedule(approver));
+          ->CopyFrom(_getMaintenanceSchedule(approvers));
 
         return OK(serialize(contentType, evolve(response)),
                   stringify(contentType));
@@ -4368,28 +4329,21 @@ Future<Response> Master::Http::machineDown(
     return BadRequest(ids.error());
   }
 
-  Future<Owned<ObjectApprover>> approver;
-
-  if (master->authorizer.isSome()) {
-    Option<authorization::Subject> subject = createSubject(principal);
-
-    approver = master->authorizer.get()->getObjectApprover(
-        subject, authorization::START_MAINTENANCE);
-  } else {
-    approver = Owned<ObjectApprover>(new AcceptingObjectApprover());
-  }
-
-  return approver.then(defer(
+  return ObjectApprovers::create(
+      master->authorizer,
+      principal,
+      {START_MAINTENANCE})
+    .then(defer(
       master->self(),
-      [this, ids](const Owned<ObjectApprover>& approver) {
-        return _startMaintenance(ids.get(), approver);
+      [this, ids](const Owned<ObjectApprovers>& approvers) {
+        return _startMaintenance(ids.get(), approvers);
       }));
 }
 
 
 Future<Response> Master::Http::_startMaintenance(
     const RepeatedPtrField<MachineID>& machineIds,
-    const Owned<ObjectApprover>& approver) const
+    const Owned<ObjectApprovers>& approvers) const
 {
   // Validate every machine in the list.
   Try<Nothing> isValid = maintenance::validation::machines(machineIds);
@@ -4412,11 +4366,7 @@ Future<Response> Master::Http::_startMaintenance(
             "' is not in DRAINING mode and cannot be brought down");
     }
 
-    Try<bool> approved = approver->approved(ObjectApprover::Object(id));
-
-    if (approved.isError()) {
-      return InternalServerError("Authorization error: " + approved.error());
-    } else if (!approved.get()) {
+    if (!approvers->approved<START_MAINTENANCE>(id)) {
       return Forbidden();
     }
   }
@@ -4477,23 +4427,16 @@ Future<Response> Master::Http::startMaintenance(
   CHECK_EQ(mesos::master::Call::START_MAINTENANCE, call.type());
   CHECK(call.has_start_maintenance());
 
-  Future<Owned<ObjectApprover>> approver;
-
-  if (master->authorizer.isSome()) {
-    Option<authorization::Subject> subject = createSubject(principal);
-
-    approver = master->authorizer.get()->getObjectApprover(
-        subject, authorization::START_MAINTENANCE);
-  } else {
-    approver = Owned<ObjectApprover>(new AcceptingObjectApprover());
-  }
-
   RepeatedPtrField<MachineID> machineIds = call.start_maintenance().machines();
 
-  return approver.then(defer(
+  return ObjectApprovers::create(
+      master->authorizer,
+      principal,
+      {START_MAINTENANCE})
+    .then(defer(
       master->self(),
-      [this, machineIds](const Owned<ObjectApprover>& approver) {
-        return _startMaintenance(machineIds, approver);
+      [this, machineIds](const Owned<ObjectApprovers>& approvers) {
+        return _startMaintenance(machineIds, approvers);
       }));
 }
 
@@ -4549,28 +4492,21 @@ Future<Response> Master::Http::machineUp(
     return BadRequest(ids.error());
   }
 
-  Future<Owned<ObjectApprover>> approver;
-
-  if (master->authorizer.isSome()) {
-    Option<authorization::Subject> subject = createSubject(principal);
-
-    approver = master->authorizer.get()->getObjectApprover(
-        subject, authorization::STOP_MAINTENANCE);
-  } else {
-    approver = Owned<ObjectApprover>(new AcceptingObjectApprover());
-  }
-
-  return approver.then(defer(
+  return ObjectApprovers::create(
+      master->authorizer,
+      principal,
+      {STOP_MAINTENANCE})
+    .then(defer(
       master->self(),
-      [this, ids](const Owned<ObjectApprover>& approver) {
-        return _stopMaintenance(ids.get(), approver);
+      [this, ids](const Owned<ObjectApprovers>& approvers) {
+        return _stopMaintenance(ids.get(), approvers);
       }));
 }
 
 
 Future<Response> Master::Http::_stopMaintenance(
     const RepeatedPtrField<MachineID>& machineIds,
-    const Owned<ObjectApprover>& approver) const
+    const Owned<ObjectApprovers>& approvers) const
 {
   // Validate every machine in the list.
   Try<Nothing> isValid = maintenance::validation::machines(machineIds);
@@ -4592,11 +4528,7 @@ Future<Response> Master::Http::_stopMaintenance(
             "' is not in DOWN mode and cannot be brought up");
     }
 
-    Try<bool> approved = approver->approved(ObjectApprover::Object(id));
-
-    if (approved.isError()) {
-      return InternalServerError("Authorization error: " + approved.error());
-    } else if (!approved.get()) {
+    if (!approvers->approved<STOP_MAINTENANCE>(id)) {
       return Forbidden();
     }
   }
@@ -4659,22 +4591,14 @@ Future<Response> Master::Http::stopMaintenance(
 
   RepeatedPtrField<MachineID> machineIds = call.stop_maintenance().machines();
 
-
-  Future<Owned<ObjectApprover>> approver;
-
-  if (master->authorizer.isSome()) {
-    Option<authorization::Subject> subject = createSubject(principal);
-
-    approver = master->authorizer.get()->getObjectApprover(
-        subject, authorization::STOP_MAINTENANCE);
-  } else {
-    approver = Owned<ObjectApprover>(new AcceptingObjectApprover());
-  }
-
-  return approver.then(defer(
+  return ObjectApprovers::create(
+      master->authorizer,
+      principal,
+      {STOP_MAINTENANCE})
+    .then(defer(
       master->self(),
-      [this, machineIds](const Owned<ObjectApprover>& approver) {
-        return _stopMaintenance(machineIds, approver);
+      [this, machineIds](const Owned<ObjectApprovers>& approvers) {
+        return _stopMaintenance(machineIds, approvers);
       }));
 }
 
@@ -4722,24 +4646,16 @@ Future<Response> Master::Http::maintenanceStatus(
     return MethodNotAllowed({"GET"}, request.method);
   }
 
-  Future<Owned<ObjectApprover>> approver;
-
-  if (master->authorizer.isSome()) {
-    Option<authorization::Subject> subject = createSubject(principal);
-
-    approver = master->authorizer.get()->getObjectApprover(
-        subject, authorization::GET_MAINTENANCE_STATUS);
-  } else {
-    approver = Owned<ObjectApprover>(new AcceptingObjectApprover());
-  }
-
   Option<string> jsonp = request.url.query.get("jsonp");
 
-  return approver
+  return ObjectApprovers::create(
+      master->authorizer,
+      principal,
+      {GET_MAINTENANCE_STATUS})
     .then(defer(
       master->self(),
-      [this](const Owned<ObjectApprover>& approver) {
-        return _getMaintenanceStatus(approver);
+      [this](const Owned<ObjectApprovers>& approvers) {
+        return _getMaintenanceStatus(approvers);
       }))
     .then([jsonp](const mesos::maintenance::ClusterStatus& status) -> Response {
       return OK(JSON::protobuf(status), jsonp);
@@ -4748,7 +4664,7 @@ Future<Response> Master::Http::maintenanceStatus(
 
 
 Future<mesos::maintenance::ClusterStatus> Master::Http::_getMaintenanceStatus(
-    const Owned<ObjectApprover>& approver) const
+    const Owned<ObjectApprovers>& approvers) const
 {
   return master->allocator->getInverseOfferStatuses()
     .then(defer(
@@ -4765,16 +4681,7 @@ Future<mesos::maintenance::ClusterStatus> Master::Http::_getMaintenanceStatus(
         const MachineID& id,
         const Machine& machine,
         master->machines) {
-      Try<bool> approved = approver->approved(ObjectApprover::Object(id));
-
-      if (approved.isError()) {
-        LOG(WARNING) << "Error during MachineID authorization: "
-                     << approved.error();
-        // TODO(arojas): Consider exposing these errors to the caller.
-        continue;
-      }
-
-      if (!approved.get()) {
+      if (!approvers->approved<GET_MAINTENANCE_STATUS>(id)) {
         continue;
       }
 
@@ -4823,22 +4730,14 @@ Future<Response> Master::Http::getMaintenanceStatus(
 {
   CHECK_EQ(mesos::master::Call::GET_MAINTENANCE_STATUS, call.type());
 
-  Future<Owned<ObjectApprover>> approver;
-
-  if (master->authorizer.isSome()) {
-    Option<authorization::Subject> subject = createSubject(principal);
-
-    approver = master->authorizer.get()->getObjectApprover(
-        subject, authorization::GET_MAINTENANCE_STATUS);
-  } else {
-    approver = Owned<ObjectApprover>(new AcceptingObjectApprover());
-  }
-
-  return approver
+  return ObjectApprovers::create(
+      master->authorizer,
+      principal,
+      {GET_MAINTENANCE_STATUS})
     .then(defer(
       master->self(),
-      [this](const Owned<ObjectApprover>& approver) {
-        return _getMaintenanceStatus(approver);
+      [this](const Owned<ObjectApprovers>& approvers) {
+        return _getMaintenanceStatus(approvers);
       }))
     .then([contentType](const mesos::maintenance::ClusterStatus& status)
           -> Response {
@@ -5079,27 +4978,16 @@ Future<Response> Master::Http::markAgentGone(
 {
   CHECK_EQ(mesos::master::Call::MARK_AGENT_GONE, call.type());
 
-  Future<Owned<ObjectApprover>> approver;
-
-  if (master->authorizer.isSome()) {
-    Option<authorization::Subject> subject = createSubject(principal);
-
-    approver = master->authorizer.get()->getObjectApprover(
-        subject, authorization::MARK_AGENT_GONE);
-  } else {
-    approver = Owned<ObjectApprover>(new AcceptingObjectApprover());
-  }
-
   const SlaveID& slaveId = call.mark_agent_gone().slave_id();
 
-  return approver.then(defer(master->self(),
-      [this, slaveId](const Owned<ObjectApprover>& approver)
+  return ObjectApprovers::create(
+      master->authorizer,
+      principal,
+      {MARK_AGENT_GONE})
+    .then(defer(master->self(),
+      [this, slaveId](const Owned<ObjectApprovers>& approvers)
           -> Future<Response> {
-    Try<bool> approved = approver->approved((ObjectApprover::Object()));
-
-    if (approved.isError()) {
-      return InternalServerError("Authorization error: " + approved.error());
-    } else if (!approved.get()) {
+    if (!approvers->approved<MARK_AGENT_GONE>()) {
       return Forbidden();
     }
 
