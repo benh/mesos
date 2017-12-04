@@ -115,7 +115,7 @@ using google::protobuf::RepeatedPtrField;
 using mesos::SecretGenerator;
 
 using mesos::authorization::createSubject;
-
+using mesos::authorization::ACCESS_SANDBOX;
 using mesos::executor::Call;
 
 using mesos::master::detector::MasterDetector;
@@ -7446,17 +7446,13 @@ Future<bool> Slave::authorizeSandboxAccess(
     return true;
   }
 
-  // Set authorization subject.
-  Option<authorization::Subject> subject = createSubject(principal);
-
-  Future<Owned<ObjectApprover>> sandboxApprover =
-    authorizer.get()->getObjectApprover(subject, authorization::ACCESS_SANDBOX);
-
-  return sandboxApprover
+  return ObjectApprovers::create(
+      authorizer,
+      principal,
+      {ACCESS_SANDBOX})
     .then(defer(
         self(),
-        [this, frameworkId, executorId](
-            const Owned<ObjectApprover>& sandboxApprover) -> Future<bool> {
+        [=](const Owned<ObjectApprovers>& approvers) -> Future<bool> {
           // Construct authorization object.
           ObjectApprover::Object object;
 
@@ -7471,13 +7467,7 @@ Future<bool> Slave::authorizeSandboxAccess(
             }
           }
 
-          Try<bool> approved = sandboxApprover->approved(object);
-
-          if (approved.isError()) {
-            return Failure(approved.error());
-          }
-
-          return approved.get();
+          return approvers->approved<ACCESS_SANDBOX>(object);
         }));
 }
 
