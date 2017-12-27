@@ -29,10 +29,6 @@
 
 namespace process {
 
-// Forward declaration.
-class HttpProxy;
-
-
 class SocketManager
 {
 public:
@@ -40,11 +36,8 @@ public:
   ~SocketManager();
 
   // Closes all managed sockets and clears any associated metadata.
-  // The `__s__` server socket must be closed and `ProcessManager`
-  // must be finalized before calling this.
+  // The `ProcessManager` must be finalized before calling this.
   void finalize();
-
-  void accepted(const network::inet::Socket& socket);
 
   void link(
       ProcessBase* process,
@@ -56,23 +49,6 @@ public:
   // Test-only method to fetch the file descriptor behind a
   // persistent socket.
   Option<int_fd> get_persistent_socket(const UPID& to);
-
-  PID<HttpProxy> proxy(const network::inet::Socket& socket);
-
-  // Used to clean up the pointer to an `HttpProxy` in case the
-  // `HttpProxy` is killed outside the control of the `SocketManager`.
-  // This generally happens when `process::finalize` is called.
-  void unproxy(const network::inet::Socket& socket);
-
-  void send(
-      Encoder* encoder,
-      bool persist,
-      const network::inet::Socket& socket);
-
-  void send(
-      const http::Response& response,
-      const http::Request& request,
-      const network::inet::Socket& socket);
 
   void send(
       Message&& message,
@@ -145,9 +121,6 @@ private:
 
   // Map from outbound socket to outgoing queue.
   hashmap<int_fd, std::queue<Encoder*>> outgoing;
-
-  // HTTP proxies.
-  hashmap<int_fd, HttpProxy*> proxies;
 
   // Protects instance variables.
   std::recursive_mutex mutex;
