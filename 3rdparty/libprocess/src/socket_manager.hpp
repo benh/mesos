@@ -95,7 +95,7 @@ private:
   void send_connect(
       const Future<Nothing>& future,
       network::inet::Socket socket,
-      Message&& message);
+      const network::inet::Address& address);
 
   // Collection of all active sockets (both inbound and outbound).
   hashmap<int_fd, network::inet::Socket> sockets;

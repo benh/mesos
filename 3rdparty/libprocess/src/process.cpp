@@ -1514,7 +1514,7 @@ void ignore_recv_data(
 
 
 // Forward declaration.
-void send(Encoder* encoder, Socket socket);
+Future<Nothing> send(Socket socket);
 
 
 } // namespace internal {
@@ -1526,10 +1526,7 @@ void SocketManager::link_connect(
     const UPID& to)
 {
   if (future.isDiscarded() || future.isFailed()) {
-    if (future.isFailed()) {
-      LOG(WARNING) << "Failed to link to '" << to.address
-                   << "', connect: " << future.failure();
-    }
+    LOG(WARNING) << "Failed to connect to '" << to.address << "': " << future;
 
     // Check if SSL is enabled, and whether we allow a downgrade to
     // non-SSL traffic.
@@ -1612,22 +1609,12 @@ void SocketManager::link_connect(
           size));
   }
 
-  // In order to avoid a race condition where internal::send() is
-  // called after SocketManager::link() but before the socket is
-  // connected, we initialize the 'outgoing' queue in
-  // SocketManager::link() and then check if the queue has anything in
-  // it to send during this connection completion. When a subsequent
-  // call to SocketManager::send() occurs we'll now just add the
-  // encoder to the 'outgoing' queue, and when we complete the
-  // connection here we'll start sending, otherwise when we call
-  // SocketManager::next() the 'outgoing' queue will get removed and
-  // any subsequent call to SocketManager::send() will take care of
-  // setting it back up and sending.
-  Encoder* encoder = socket_manager->next(socket);
-
-  if (encoder != nullptr) {
-    internal::send(encoder, socket);
-  }
+  // It's possible that `SocketManager::send()` has been called after
+  // `SocketManager::link()` but before the socket was connected so we
+  // need to attempt to start sending any encoders that have gotten
+  // enqueued for this socket. If nothing has been enqueued we'll do
+  // nothing and just return.
+  internal::send(socket);
 }
 
 
@@ -1681,11 +1668,11 @@ void SocketManager::link(
 
         persists.emplace(to.address, s);
 
-        // Initialize 'outgoing' to prevent a race with
-        // SocketManager::send() while the socket is not yet connected.
-        // Initializing the 'outgoing' queue prevents
-        // SocketManager::send() from trying to write before it's
-        // connected.
+        // Initialize `outgoing` to prevent a race with
+        // `SocketManager::send()` while the socket is not yet
+        // connected. Initializing `outgoing` causes
+        // `SocketManager::send()` to enqueue an encoder and then
+        // return rather than attempt to start sending.
         outgoing[s];
 
         connect = true;
@@ -1775,72 +1762,34 @@ Option<int_fd> SocketManager::get_persistent_socket(const UPID& to)
 
 namespace internal {
 
-Future<Nothing> _send(Encoder* encoder, Socket socket);
-
-void send(Encoder* encoder, Socket socket)
+Future<Nothing> send(Socket socket)
 {
-  _send(encoder, socket)
-    .then([socket] {
-      // Continue sending until this socket has no more
-      // queued outgoing messages.
-      return process::loop(
-          None(),
-          [=] { return socket_manager->next(socket); },
-          [=](Encoder* encoder) -> Future<ControlFlow<Nothing>> {
-            if (encoder == nullptr) {
-              return Break();
-            }
-
-            return _send(encoder, socket)
-              .then([]() -> ControlFlow<Nothing> { return Continue(); });
-        });
-    });
-}
-
-
-Future<Nothing> _send(Encoder* encoder, Socket socket)
-{
-  // Loop until all of the data in the provided encoder is sent.
-  return process::loop(
+  // TODO(benh): Explain how a thread might start the loop and may
+  // even send one or more encoders but the event loop thread will
+  // continue the loop if any sends end up blocking.
+  return loop(
       None(),
-      [=] {
-        size_t size;
-        Future<size_t> send;
-
-        switch (encoder->kind()) {
-          case Encoder::DATA: {
-            const char* data =
-              static_cast<DataEncoder*>(encoder)->next(&size);
-            send = socket.send(data, size);
-            break;
-          }
-          case Encoder::FILE: {
-            off_t offset;
-            int_fd fd =
-              static_cast<FileEncoder*>(encoder)->next(&offset, &size);
-            send = socket.sendfile(fd, offset, size);
-            break;
-          }
+      [=]() -> Option<Encoder*> {
+        // Check for stuff to send on socket.
+        Encoder* encoder = socket_manager->next(socket);
+        if (encoder != nullptr) {
+          return encoder;
         }
-
-        return send
-          .then([=](size_t sent) {
-            // Update the encoder with the amount sent.
-            encoder->backup(size - sent);
-            return Nothing();
-          })
-          .recover([=](const Future<Nothing>& f) {
-            socket_manager->close(socket);
-            delete encoder;
-            return f; // Break the loop by propagating the "failure".
-          });
+        return None();
       },
-      [=](Nothing) -> ControlFlow<Nothing> {
-        if (encoder->remaining() == 0) {
-          delete encoder;
+      [=](Option<Encoder*> encoder) -> Future<ControlFlow<Nothing>> {
+        if (encoder.isNone()) {
           return Break();
         }
-        return Continue();
+
+        return send(socket, Owned<Encoder>(encoder.get()))
+          .recover([=](const Future<Nothing>& future) {
+            socket_manager->close(socket);
+            return future; // Propagate the failure to break the loop.
+          })
+          .then([=]() -> ControlFlow<Nothing> {
+            return Continue();
+          });
       });
 }
 
@@ -1850,13 +1799,10 @@ Future<Nothing> _send(Encoder* encoder, Socket socket)
 void SocketManager::send_connect(
     const Future<Nothing>& future,
     Socket socket,
-    Message&& message)
+    const Address& address)
 {
   if (future.isDiscarded() || future.isFailed()) {
-    if (future.isFailed()) {
-      LOG(WARNING) << "Failed to send '" << message.name << "' to '"
-                   << message.to.address << "', connect: " << future.failure();
-    }
+    LOG(WARNING) << "Failed to connect to '" << address << "': " << future;
 
     // Check if SSL is enabled, and whether we allow a downgrade to
     // non-SSL traffic.
@@ -1875,7 +1821,7 @@ void SocketManager::send_connect(
       synchronized (mutex) {
         Try<Socket> create = Socket::create(SocketImpl::Kind::POLL);
         if (create.isError()) {
-          LOG(WARNING) << "Failed to link to '" << message.to.address
+          LOG(WARNING) << "Failed to connect to '" << address
                        << "', create socket: " << create.error();
           socket_manager->close(socket);
           return;
@@ -1892,15 +1838,11 @@ void SocketManager::send_connect(
       }
 
       CHECK_SOME(poll_socket);
-      Future<Nothing> connect = poll_socket->connect(message.to.address);
-      connect.onAny(lambda::bind(
-          // TODO(benh): with C++14 we can use lambda instead of
-          // `std::bind` and capture `message` with a `std::move`.
-          [this, poll_socket](Message& message, const Future<Nothing>& f) {
-            send_connect(f, poll_socket.get(), std::move(message));
-          },
-          std::move(message),
-          lambda::_1));
+      poll_socket->connect(address)
+        .onAny(
+            [this, poll_socket, address](const Future<Nothing>& future) {
+              send_connect(future, poll_socket.get(), address);
+            });
 
       // We don't need to 'shutdown()' the socket as it was never
       // connected.
@@ -1912,8 +1854,6 @@ void SocketManager::send_connect(
 
     return;
   }
-
-  Encoder* encoder = new MessageEncoder(message);
 
   // Receive and ignore data from this socket. Note that we don't
   // expect to receive anything other than HTTP '202 Accepted'
@@ -1929,7 +1869,10 @@ void SocketManager::send_connect(
         data,
         size));
 
-  internal::send(encoder, socket);
+  // And start sending on the socket. We should have at least one
+  // encoder enqueued that initiated the connection in the first
+  // place.
+  internal::send(socket);
 }
 
 
@@ -1946,17 +1889,19 @@ void SocketManager::send(Message&& message, const SocketImpl::Kind& kind)
     bool temp = temps.count(address) > 0;
     if (persist || temp) {
       int_fd s = persist ? persists[address] : temps[address];
-      CHECK(sockets.count(s) > 0);
+      CHECK(sockets.contains(s));
       socket = sockets.at(s);
 
-      if (outgoing.count(socket.get()) > 0) {
+      if (outgoing.contains(socket.get())) {
         outgoing[socket.get()].push(new MessageEncoder(message));
+
+        // This means someone else is already sending and they'll
+        // dequeue this encoder and we don't need to do anything so we
+        // can just return.
         return;
       } else {
-        // Initialize the outgoing queue.
-        outgoing[socket.get()];
+        outgoing[socket.get()].push(new MessageEncoder(message));
       }
-
     } else {
       // No persistent or temporary socket to the socket address
       // currently exists, so we create a temporary one.
@@ -1979,8 +1924,7 @@ void SocketManager::send(Message&& message, const SocketImpl::Kind& kind)
       addresses.emplace(s, address);
       temps.emplace(address, s);
 
-      // Initialize the outgoing queue.
-      outgoing[s];
+      outgoing[socket.get()].push(new MessageEncoder(message));
 
       connect = true;
     }
@@ -1989,16 +1933,15 @@ void SocketManager::send(Message&& message, const SocketImpl::Kind& kind)
   if (connect) {
     CHECK_SOME(socket);
     socket->connect(address)
-      .onAny(lambda::bind(
-            // TODO(benh): with C++14 we can use lambda instead of
-            // `std::bind` and capture `message` with a `std::move`.
-            [this, socket](Message& message, const Future<Nothing>& f) {
-              send_connect(f, socket.get(), std::move(message));
-            }, std::move(message), lambda::_1));
+      .onAny([this, socket, address](const Future<Nothing>& future) {
+        send_connect(future, socket.get(), address);
+      });
   } else {
-    // If we're not connecting and we haven't added the encoder to
-    // the 'outgoing' queue then schedule it to be sent.
-    internal::send(new MessageEncoder(message), socket.get());
+    // If we're not connecting and we didn't return (see above) then
+    // we've added the encoder to the `outgoing` queue but we need to
+    // start sending on this socket. We have to do this here so that
+    // we're outside of the `synchronized` block.
+    internal::send(socket.get());
   }
 }
 
@@ -2019,8 +1962,8 @@ Encoder* SocketManager::next(int_fd s)
     // invoked we find out there there is no more data and thus stop
     // sending.
     // TODO(benh): Should we actually finish sending the data!?
-    if (sockets.count(s) > 0) {
-      CHECK(outgoing.count(s) > 0);
+    if (sockets.contains(s)) {
+      CHECK(outgoing.contains(s));
 
       if (!outgoing[s].empty()) {
         // More messages!
