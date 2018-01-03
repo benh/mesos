@@ -116,7 +116,9 @@
 #include "event_loop.hpp"
 #include "event_queue.hpp"
 #include "gate.hpp"
+#ifndef USE_HTTP_SERVER
 #include "http_proxy.hpp"
+#endif // USE_HTTP_SERVER
 #include "memory_profiler.hpp"
 #include "process_reference.hpp"
 #include "socket_manager.hpp"
@@ -471,8 +473,15 @@ static std::atomic_bool initialize_started(false);
 static std::atomic_bool initialize_complete(false);
 
 // Server socket listen backlog.
-static const int LISTEN_BACKLOG = 500000;
+static const size_t LISTEN_BACKLOG = 500000;
 
+// Local socket address.
+static inet::Address __address__ = inet4::Address::ANY_ANY();
+
+// Local IPv6 socket address.
+static Option<inet6::Address> __address6__ = None();
+
+#ifndef USE_HTTP_SERVER
 // Local server socket.
 static Socket* __s__ = nullptr;
 
@@ -484,12 +493,10 @@ static std::mutex* socket_mutex = new std::mutex();
 // This is used in `process::finalize` to explicitly terminate the
 // `__s__` socket's callback loop.
 static Future<Socket> future_accept;
-
-// Local socket address.
-static inet::Address __address__ = inet4::Address::ANY_ANY();
-
-// Local IPv6 socket address.
-static Option<inet6::Address> __address6__ = None();
+#else // USE_HTTP_SERVER
+// HTTP server.
+static http::Server* server = nullptr;
+#endif // USE_HTTP_SERVER
 
 // Active SocketManager (eventually will probably be thread-local).
 //
@@ -788,6 +795,7 @@ static Future<MessageEvent*> parse(const Request& request)
 }
 
 
+#ifndef USE_HTTP_SERVER
 namespace internal {
 
 void decode_recv(
@@ -869,6 +877,7 @@ void decode_recv(
 }
 
 } // namespace internal {
+#endif // USE_HTTP_SERVER
 
 
 void timedout(const list<Timer>& timers)
@@ -909,6 +918,7 @@ void timedout(const list<Timer>& timers)
 // }
 
 
+#ifndef USE_HTTP_SERVER
 namespace internal {
 
 void on_accept(const Future<Socket>& socket)
@@ -964,6 +974,7 @@ void on_accept(const Future<Socket>& socket)
 }
 
 } // namespace internal {
+#endif // USE_HTTP_SERVER
 
 
 namespace firewall {
@@ -1127,18 +1138,17 @@ bool initialize(
   }
 
   // Create a "server" socket for communicating.
-  Try<Socket> create = Socket::create();
-  if (create.isError()) {
-    LOG(FATAL) << "Failed to construct server socket:" << create.error();
+  Try<Socket> socket = Socket::create();
+  if (socket.isError()) {
+    LOG(FATAL) << "Failed to construct server socket:" << socket.error();
   }
-  __s__ = new Socket(create.get());
 
   // Allow address reuse.
   // NOTE: We cast to `char*` here because the function prototypes on Windows
   // use `char*` instead of `void*`.
   int on = 1;
   if (::setsockopt(
-          __s__->get(),
+          socket->get(),
           SOL_SOCKET,
           SO_REUSEADDR,
           reinterpret_cast<char*>(&on),
@@ -1146,7 +1156,7 @@ bool initialize(
     PLOG(FATAL) << "Failed to initialize, setsockopt(SO_REUSEADDR)";
   }
 
-  Try<Address> bind = __s__->bind(__address__);
+  Try<Address> bind = socket->bind(__address__);
   if (bind.isError()) {
     LOG(FATAL) << "Failed to initialize: " << bind.error();
   }
@@ -1185,17 +1195,10 @@ bool initialize(
     __address__.ip = ip.get();
   }
 
-  Try<Nothing> listen = __s__->listen(LISTEN_BACKLOG);
-  if (listen.isError()) {
-    LOG(FATAL) << "Failed to initialize: " << listen.error();
-  }
-
-  // Need to set `initialize_complete` here so that we can actually
-  // invoke `accept()` and `spawn()` below.
+  // Need to set `initialize_complete` here so that we can invoke
+  // functions below (e.g., `spawn()` and `Socket::accept()`) that
+  // depend on initialization to complete.
   initialize_complete.store(true);
-
-  future_accept = __s__->accept()
-    .onAny(lambda::bind(&internal::on_accept, lambda::_1));
 
   // TODO(benh): Make sure creating the logging process, and profiler
   // always succeeds and use supervisors to make sure that none
@@ -1271,6 +1274,56 @@ bool initialize(
 
   processes_route = new Route("/__processes__", None(), __processes__);
 
+#ifndef USE_HTTP_SERVER
+  __s__ = new Socket(socket.get());
+
+  Try<Nothing> listen = __s__->listen(LISTEN_BACKLOG);
+  if (listen.isError()) {
+    LOG(FATAL) << "Failed to initialize: " << listen.error();
+  }
+
+  future_accept = __s__->accept()
+    .onAny(lambda::bind(&internal::on_accept, lambda::_1));
+#else // USE_HTTP_SERVER
+  // Start the HTTP server for accepting connections and handling
+  // incoming requests (we do this after everything is set up so that
+  // we don't race with incomping connections).
+  http::Scheme scheme = http::Scheme::HTTP;
+
+#ifdef USE_SSL_SOCKET
+  if (network::openssl::flags().enabled) {
+    CHECK(socket->kind() == network::internal::SocketImpl::Kind::SSL);
+    scheme = http::Scheme::HTTPS;
+  }
+#endif
+
+  Try<http::Server> create = http::Server::create(
+      socket.get(),
+      [&](const network::Socket& socket, const http::Request& request) {
+        return process_manager->handle(
+            socket,
+            std::unique_ptr<Request>(new Request(request)));
+      },
+      {
+        /* .scheme = */ scheme,
+        /* .backlog = */ LISTEN_BACKLOG,
+      });
+
+  if (create.isError()) {
+    LOG(FATAL) << "Failed to construct server: " << create.error();
+  }
+
+  server = new http::Server(std::move(create.get()));
+
+  server->run()
+    .onDiscarded([]() {
+      LOG(FATAL) << "HTTP server discarded";
+    })
+    .onFailed([](const string& failure) {
+      LOG(FATAL) << "HTTP server failed: " << failure;
+    });
+#endif // USE_HTTP_SERVER
+
   VLOG(1) << "libprocess is initialized on " << address() << " with "
           << num_worker_threads << " worker threads";
 
@@ -1295,6 +1348,7 @@ void finalize(bool finalize_wsa)
   delete processes_route;
   processes_route = nullptr;
 
+#ifndef USE_HTTP_SERVER
   // Close the server socket.
   // This will prevent any further connections managed by the `SocketManager`.
   synchronized (socket_mutex) {
@@ -1306,6 +1360,12 @@ void finalize(bool finalize_wsa)
     delete __s__;
     __s__ = nullptr;
   }
+#else // USE_HTTP_SERVER
+  // Prevent any further calls into `ProcessManager` from HTTP server.
+  server->stop(); // TODO(benh): Await for `stop()` to complete?
+  delete server;
+  server = nullptr;
+#endif // USE_HTTP_SERVER
 
   // Terminate all running processes and prevent further processes from
   // being spawned. This will also clean up any metadata for running
