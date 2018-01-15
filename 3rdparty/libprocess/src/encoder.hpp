@@ -153,14 +153,18 @@ public:
 class HttpResponseEncoder : public DataEncoder
 {
 public:
+  // Encodes the `response` given the specified `request` overwriting
+  // any headers in `response` with the specified `headers`.
   HttpResponseEncoder(
       const http::Response& response,
-      const http::Request& request)
-    : DataEncoder(encode(response, request)) {}
+      const http::Request& request,
+      http::Headers&& headers = {})
+    : DataEncoder(encode(response, request, std::move(headers))) {}
 
   static std::string encode(
       const http::Response& response,
-      const http::Request& request)
+      const http::Request& request,
+      http::Headers&& headers = {})
   {
     std::ostringstream out;
 
@@ -168,7 +172,12 @@ public:
 
     out << "HTTP/1.1 " << response.status << "\r\n";
 
-    auto headers = response.headers;
+    // Copy all the headers that we're not overriding into `headers`.
+    foreachpair (auto key, auto value, response.headers) {
+      if (!headers.contains(key)) {
+        headers[key] = value;
+      }
+    }
 
     // HTTP 1.1 requires the "Date" header. In the future once we
     // start checking the version (above) then we can conditionally

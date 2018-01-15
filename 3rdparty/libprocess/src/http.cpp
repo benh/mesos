@@ -1475,25 +1475,28 @@ Future<Connection> connect(const URL& url)
 
 namespace internal {
 
-// Helper for creating an `Encoder` from a `Response` and `Request`.
+// Helper for creating an `Encoder` from a `Response`, a `Request`,
+// and any `Headers` to override in the `Response`.
 Owned<Encoder> encode(
     const Response& response,
-    const Request& request)
+    const Request& request,
+    Headers&& headers = {})
 {
-  return Owned<Encoder>(new HttpResponseEncoder(response, request));
+  return Owned<Encoder>(
+      new HttpResponseEncoder(response, request, std::move(headers)));
 }
 
 
 Future<Nothing> sendfile(
     network::Socket socket,
-    Response response,
+    const Response& response,
     const Request& request)
 {
   CHECK(response.type == Response::PATH);
 
-  // Make sure no body is sent (this is really an error and
-  // should be reported and no response sent.
-  response.body.clear();
+  if (!response.body.empty()) {
+    return Failure("Response body is non-empty but response type is PATH");
+  }
 
   Try<int_fd> fd = os::open(response.path, O_CLOEXEC | O_NONBLOCK | O_RDONLY);
 
@@ -1525,11 +1528,11 @@ Future<Nothing> sendfile(
 
   // While the user is expected to properly set a 'Content-Type'
   // header, we'll fill in (or overwrite) 'Content-Length' header.
-  response.headers["Content-Length"] = stringify(size->bytes());
+  Headers headers = {{"Content-Length", stringify(size->bytes())}};
 
   // TODO(benh): If this is a TCP socket consider turning on TCP_CORK
   // for both sends and then turning it off.
-  return send(socket, encode(response, request))
+  return send(socket, encode(response, request, std::move(headers)))
     .onAny([=](const Future<Nothing>& future) {
       // Close file descriptor if we aren't doing any more sending.
       if (future.isDiscarded() || future.isFailed()) {
@@ -1583,14 +1586,14 @@ Future<Nothing> stream(
 
 Future<Nothing> stream(
     const network::Socket& socket,
-    Response response,
+    const Response& response,
     const Request& request)
 {
   CHECK(response.type == Response::PIPE);
 
-  // Make sure no body is sent (this is really an error and
-  // should be reported and no response sent).
-  response.body.clear();
+  if (!response.body.empty()) {
+    return Failure("Response body is non-empty but response type is PIPE");
+  }
 
   if (response.reader.isNone()) {
     // This is clearly a programmer error, we don't have a reader from
@@ -1604,18 +1607,21 @@ Future<Nothing> stream(
     return send(socket, encode(InternalServerError(body), request));
   }
 
+  // We need to get a copy of the reader since `response` is `const`.
+  Pipe::Reader reader = response.reader.get();
+
   // While the user is expected to properly set a 'Content-Type'
   // header, we'll fill in (or overwrite) 'Transfer-Encoding' header.
-  response.headers["Transfer-Encoding"] = "chunked";
+  Headers headers = {{"Transfer-Encoding", "chunked"}};
 
-  return send(socket, encode(response, request))
+  return send(socket, encode(response, request, std::move(headers)))
     .then([=]() {
-      return stream(socket, response.reader.get());
+      return stream(socket, reader);
     })
     // Regardless of whether `send` or `stream` completed successfully
     // or failed we close the reader so any writers will be notified.
     .onAny([=]() mutable {
-      response.reader->close();
+      reader.close();
     });
 }
 
