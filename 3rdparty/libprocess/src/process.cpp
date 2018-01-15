@@ -1638,7 +1638,7 @@ void SocketManager::link(
         // nothing and just return.
         internal::send(socket.get());
       })
-      .onFailure([to](const string& failure) {
+      .onFailed([to](const string& failure) {
         LOG(WARNING) << "Failed to link to '"
                      << to.address << "': Failed to connect: " << failure;
       });
@@ -1884,7 +1884,7 @@ void SocketManager::send(Message&& message, const SocketImpl::Kind& kind)
         // first place.
         internal::send(socket.get());
       })
-      .onFailure([name, address](const string& failure) {
+      .onFailed([name, address](const string& failure) {
         LOG(WARNING) << "Failed to send '" << name << "' to '"
                      << address << "': Failed to connect: " << failure;
       });
