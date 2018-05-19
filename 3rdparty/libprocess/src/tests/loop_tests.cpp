@@ -148,19 +148,24 @@ TEST(LoopTest, AbandonedIterate)
 {
   Owned<Promise<int>> promise(new Promise<int>());
 
-  Future<Nothing> future = loop(
-      [&]() {
-        return promise->future();
+  // Need to grab the future to avoid the race with `promise.reset()`
+  // below because the `loop()` will by default be executed on another
+  // process.
+  Future<int> future1 = promise->future();
+
+  Future<Nothing> future2 = loop(
+      [=]() {
+        return future1;
       },
       [](int i) -> ControlFlow<Nothing> {
         return Break();
       });
 
-  EXPECT_TRUE(future.isPending());
+  EXPECT_TRUE(future2.isPending());
 
   promise.reset();
 
-  AWAIT_EXPECT_ABANDONED(future);
+  AWAIT_EXPECT_ABANDONED(future2);
 }
 
 
@@ -168,22 +173,27 @@ TEST(LoopTest, AbandonedBody)
 {
   Owned<Promise<int>> promise(new Promise<int>());
 
-  Future<Nothing> future = loop(
+  // Need to grab the future to avoid the race with `promise.reset()`
+  // below because the `loop()` will by default be executed on another
+  // process.
+  Future<int> future1 = promise->future();
+
+  Future<Nothing> future2 = loop(
       []() {
         return 42;
       },
-      [&](int i) {
-        return promise->future()
+      [=](int i) {
+        return future1
           .then([]() -> ControlFlow<Nothing> {
             return Break();
           });
       });
 
-  EXPECT_TRUE(future.isPending());
+  EXPECT_TRUE(future2.isPending());
 
   promise.reset();
 
-  AWAIT_EXPECT_ABANDONED(future);
+  AWAIT_EXPECT_ABANDONED(future2);
 }
 
 

@@ -935,9 +935,6 @@ void on_accept(const Future<Socket>& socket)
   } else {
     CHECK_READY(socket);
 
-    // Inform the socket manager for proper bookkeeping.
-    socket_manager->accepted(socket.get());
-
     const size_t size = 80 * 1024;
     char* data = new char[size];
 
@@ -1470,21 +1467,26 @@ void SocketManager::finalize()
   //
   // CHECK(gc == nullptr);
 
-  int_fd socket = -1;
   // Close each socket.
+  Option<Socket> socket = None();
+
   // Don't hold the lock since there is a dependency between `SocketManager`
   // and `ProcessManager`, which may result in deadlock.  See comments in
   // `SocketManager::close` for more details.
   do {
     synchronized (mutex) {
-      socket = !sockets.empty() ? sockets.begin()->first : -1;
+      if (!sockets.empty()) {
+        socket = sockets.begin()->second;
+      } else {
+        socket = None();
+      }
     }
 
-    if (socket >= 0) {
+    if (socket.isSome()) {
       // This will also clean up any other state related to this socket.
-      close(socket);
+      close(socket.get());
     }
-  } while (socket >= 0);
+  } while (socket.isSome());
 }
 
 
@@ -1781,7 +1783,7 @@ Future<Nothing> SocketManager::connect(Socket socket, const Address& address)
       size_t size = 80 * 1024;
       char* data = new char[size];
 
-      return loop(
+      loop(
          None(),
          [=]() {
            return socket.recv(data, size);
@@ -1798,6 +1800,8 @@ Future<Nothing> SocketManager::connect(Socket socket, const Address& address)
           close(socket);
           delete[] data;
         });
+
+      return Nothing();
     });
 }
 
@@ -1926,13 +1930,29 @@ Encoder* SocketManager::next(int_fd s)
         // No more messages ... erase the outgoing queue.
         outgoing.erase(s);
 
-        // We should always have an address because all sockets are
-        // created for linking or sending.
-        Option<Address> address = addresses.get(s);
-        CHECK_SOME(address);
-        temps.erase(address.get()); // Might be a no-op if socket not temp.
-        addresses.erase(s);
-        sockets.erase(s);
+        if (temps.containsValue(s)) {
+          Option<Address> address = addresses.get(s);
+
+          // We should always have an address because all sockets that
+          // we call `SocketManager::next()` with are created for
+          // linking or sending.
+          CHECK_SOME(address);
+
+          temps.erase(address.get()); // Might be a no-op if socket not temp.
+
+          addresses.erase(s);
+          sockets.erase(s);
+
+          // Note that we don't need to bother invoking `exited()`
+          // because the socket was not persistent (i.e., it was not
+          // used to link).
+
+          // Note that we don't bother calling
+          // `SocketManager::close()` because the last reference to
+          // the socket will close the socket and we've already
+          // cleaned everything up that we need and we don't need to
+          // call `Socket::shutdown()` because ... ?
+        }
       }
     }
   }
@@ -1941,7 +1961,7 @@ Encoder* SocketManager::next(int_fd s)
 }
 
 
-void SocketManager::close(int_fd s)
+void SocketManager::close(Socket socket)
 {
   synchronized (mutex) {
     // This socket might not be active if it was already asked to get
@@ -1949,34 +1969,35 @@ void SocketManager::close(int_fd s)
     // it and then later the recv side of the socket gets closed so we
     // try and close it again). Thus, ignore the request if we don't
     // know about the socket.
-    if (sockets.count(s) > 0) {
+    if (sockets.count(socket) > 0) {
       // Clean up any remaining encoders for this socket.
-      if (outgoing.count(s) > 0) {
-        while (!outgoing[s].empty()) {
-          Encoder* encoder = outgoing[s].front();
+      if (outgoing.count(socket) > 0) {
+        while (!outgoing[socket].empty()) {
+          Encoder* encoder = outgoing[socket].front();
           delete encoder;
-          outgoing[s].pop();
+          outgoing[socket].pop();
         }
 
-        outgoing.erase(s);
+        outgoing.erase(socket);
       }
 
       // Clean up after sockets used for remote communication.
-      Option<Address> address = addresses.get(s);
+      Option<Address> address = addresses.get(socket);
       if (address.isSome()) {
         // Don't bother invoking `exited` unless socket was persistent.
-        if (persists.count(address.get()) > 0 && persists[address.get()] == s) {
+        if (persists.count(address.get()) > 0 &&
+            persists[address.get()] == socket) {
           persists.erase(address.get());
           exited(address.get()); // Generate ExitedEvent(s)!
         } else if (temps.count(address.get()) > 0 &&
-                   temps[address.get()] == s) {
+                   temps[address.get()] == socket) {
           temps.erase(address.get());
         }
 
-        addresses.erase(s);
+        addresses.erase(socket);
       }
 
-      auto iterator = sockets.find(s);
+      auto iterator = sockets.find(socket);
 
       // We need to stop any `SocketManager::connect()` receive loops
       // as they may have the last `Socket` reference. We do this by
@@ -1988,10 +2009,10 @@ void SocketManager::close(int_fd s)
       // 'sockets.erase(s)' to avoid the potential race with the last
       // reference being in 'sockets'.
 
-      // Hold on to the Socket and remove it from the 'sockets' map so
-      // that in the case where 'shutdown()' ends up calling close the
-      // termination logic is not run twice.
-      Socket socket = iterator->second;
+      // Since we have our own copy of the socket in `socket` we can
+      // remove the socket from the `sockets` map and avoid the
+      // termination logic being run twice in the case where
+      // 'shutdown()' ends up calling `close()`.
       sockets.erase(iterator);
 
       // Failure here could be due to reasons including that the underlying

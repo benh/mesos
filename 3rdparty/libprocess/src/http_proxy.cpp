@@ -75,13 +75,13 @@ void HttpProxy::finalize()
   // Failure here could be due to reasons including that the underlying
   // socket is already closed so it by itself doesn't necessarily
   // suggest anything wrong.
-  Try<Nothing> shutdown = socket.shutdown();
+  Try<Nothing, SocketError> shutdown = socket.shutdown();
   if (shutdown.isError()) {
     LOG(INFO) << "Failed to shutdown socket with fd " << socket.get()
               << ", address " << (socket.address().isSome()
                                   ? stringify(socket.address().get())
                                   : "N/A")
-              << ": " << shutdown.error();
+              << ": " << shutdown.error().message;
   }
 
   // Need to make sure response producers know not to continue to

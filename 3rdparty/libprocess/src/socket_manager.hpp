@@ -63,7 +63,7 @@ public:
 
   Encoder* next(int_fd s);
 
-  void close(int_fd s);
+  void close(network::inet::Socket socket);
 
   void exited(const network::inet::Address& address);
   void exited(ProcessBase* process);
