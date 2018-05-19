@@ -379,11 +379,11 @@ Try<string> generate_hmac_sha256(
 template<typename Reader>
 Try<shared_ptr<RSA>> pem_to_rsa(const string& pem, Reader reader)
 {
-  BIO *bio = BIO_new_mem_buf(pem.c_str(), -1);
+  BIO* bio = BIO_new_mem_buf((void*) pem.c_str(), -1);
   if (bio == nullptr) {
     return Error("Failed to create RSA key bio");
   }
-  RSA *rsa = reader(bio, nullptr, nullptr, nullptr);
+  RSA* rsa = reader(bio, nullptr, nullptr, nullptr);
   BIO_free(bio);
   if (rsa == nullptr) {
     return Error("Failed to create RSA from key bio");
