@@ -154,7 +154,7 @@ TEST(LoopTest, AbandonedIterate)
   Future<int> future1 = promise->future();
 
   Future<Nothing> future2 = loop(
-      [=]() {
+      [=]() -> Future<int> {
         return future1;
       },
       [](int i) -> ControlFlow<Nothing> {
