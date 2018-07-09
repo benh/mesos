@@ -32,6 +32,8 @@
 #include <process/owned.hpp>
 #include <process/pid.hpp>
 
+#include <process/metrics/counter.hpp>
+
 #include <stout/duration.hpp>
 #include <stout/hashmap.hpp>
 #include <stout/lambda.hpp>
@@ -494,6 +496,21 @@ private:
 
   // Process PID.
   UPID pid;
+
+  // Metrics for this process.
+  //
+  // TODO(benh): Put these all in `struct Metrics` in order to cleanup
+  // the initialization and adding/removing?
+  metrics::Counter metrics_message_events_enqueued;
+  metrics::Counter metrics_message_events_dequeued;
+  metrics::Counter metrics_http_events_enqueued;
+  metrics::Counter metrics_http_events_dequeued;
+  metrics::Counter metrics_dispatch_events_enqueued;
+  metrics::Counter metrics_dispatch_events_dequeued;
+  metrics::Counter metrics_exited_events_enqueued;
+  metrics::Counter metrics_exited_events_dequeued;
+  metrics::Counter metrics_terminate_events_enqueued;
+  metrics::Counter metrics_terminate_events_dequeued;
 };
 
 

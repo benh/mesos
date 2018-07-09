@@ -82,6 +82,7 @@ using process::Process;
 using process::Promise;
 using process::READONLY_HTTP_AUTHENTICATION_REALM;
 using process::READWRITE_HTTP_AUTHENTICATION_REALM;
+using process::UPID;
 
 using process::http::URL;
 

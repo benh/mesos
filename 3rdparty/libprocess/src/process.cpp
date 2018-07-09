@@ -2940,12 +2940,51 @@ void ProcessManager::resume(ProcessBase* process)
     if (!blocked) {
       CHECK_NOTNULL(event);
 
+      // Update the metrics for this event.
+      struct Visitor : EventVisitor
+      {
+        explicit Visitor(ProcessBase* process) : process(process) {}
+
+        virtual void visit(const MessageEvent&)
+        {
+          process->metrics_message_events_dequeued++;
+        }
+
+        virtual void visit(const HttpEvent&)
+        {
+          process->metrics_http_events_dequeued++;
+        }
+
+        virtual void visit(const DispatchEvent&)
+        {
+          process->metrics_dispatch_events_dequeued++;
+        }
+
+        virtual void visit(const ExitedEvent&)
+        {
+          process->metrics_exited_events_dequeued++;
+        }
+
+        virtual void visit(const TerminateEvent&)
+        {
+          process->metrics_terminate_events_dequeued++;
+        }
+
+        ProcessBase* process;
+      } visitor(process);
+
+      event->visit(&visitor);
+
       // Before serving this event check if we've triggered a
       // terminate and if so purge all events until we get to the
       // terminate event.
       terminate = process->termination.load();
       if (terminate) {
         // Now purge all events until the terminate event.
+        //
+        // NOTE: we currently don't consider these "dequeued" events
+        // with respect to metrics because they do not get served (or
+        // even filtered).
         while (!event->is<TerminateEvent>()) {
           delete event;
           event = process->events->consumer.dequeue();
@@ -3396,13 +3435,36 @@ Future<Response> ProcessManager::__processes__(const Request&)
 ProcessBase::ProcessBase(const string& id)
   : events(new EventQueue()),
     reference(std::make_shared<ProcessBase*>(this)),
-    gate(std::make_shared<Gate>())
+    gate(std::make_shared<Gate>()),
+    pid(id != "" ? id : ID::generate(),  __address__),
+    // TODO(benh): put these in a different metrics "namespace", e.g.,
+    // 'process_' to avoid name collisions. Note that a metric with
+    // the same name shouldn't be able to get added.
+    metrics_message_events_enqueued(pid.id + "/message_events_enqueued"),
+    metrics_message_events_dequeued(pid.id + "/message_events_dequeued"),
+    metrics_http_events_enqueued(pid.id + "/http_events_enqueued"),
+    metrics_http_events_dequeued(pid.id + "/http_events_dequeued"),
+    metrics_dispatch_events_enqueued(pid.id + "/dispatch_events_enqueued"),
+    metrics_dispatch_events_dequeued(pid.id + "/dispatch_events_dequeued"),
+    metrics_exited_events_enqueued(pid.id + "/exited_events_enqueued"),
+    metrics_exited_events_dequeued(pid.id + "/exited_events_dequeued"),
+    metrics_terminate_events_enqueued(pid.id + "/terminate_events_enqueued"),
+    metrics_terminate_events_dequeued(pid.id + "/terminate_events_dequeued")
 {
   process::initialize();
 
-  pid.id = id != "" ? id : ID::generate();
-  pid.address = __address__;
   pid.addresses.v6 = __address6__;
+
+  metrics::add(metrics_message_events_enqueued);
+  metrics::add(metrics_message_events_dequeued);
+  metrics::add(metrics_http_events_enqueued);
+  metrics::add(metrics_http_events_dequeued);
+  metrics::add(metrics_dispatch_events_enqueued);
+  metrics::add(metrics_dispatch_events_dequeued);
+  metrics::add(metrics_exited_events_enqueued);
+  metrics::add(metrics_exited_events_dequeued);
+  metrics::add(metrics_terminate_events_enqueued);
+  metrics::add(metrics_terminate_events_dequeued);
 
   // If using a manual clock, try and set current time of process
   // using happens before relationship between creator (__process__)
@@ -3417,6 +3479,17 @@ ProcessBase::~ProcessBase()
 {
   CHECK(state.load() == ProcessBase::State::BOTTOM ||
         state.load() == ProcessBase::State::TERMINATING);
+
+  metrics::remove(metrics_message_events_enqueued);
+  metrics::remove(metrics_message_events_dequeued);
+  metrics::remove(metrics_http_events_enqueued);
+  metrics::remove(metrics_http_events_dequeued);
+  metrics::remove(metrics_dispatch_events_enqueued);
+  metrics::remove(metrics_dispatch_events_dequeued);
+  metrics::remove(metrics_exited_events_enqueued);
+  metrics::remove(metrics_exited_events_dequeued);
+  metrics::remove(metrics_terminate_events_enqueued);
+  metrics::remove(metrics_terminate_events_dequeued);
 }
 
 
@@ -3466,6 +3539,54 @@ void ProcessBase::enqueue(Event* event)
 
   State old = state.load();
 
+  if (old == State::TERMINATING) {
+    delete event;
+    return;
+  }
+
+  CHECK(old == State::BOTTOM ||
+        old == State::READY ||
+        old == State::BLOCKED);
+
+  // Update the metrics.
+  //
+  // NOTE: we must do this _BEFORE_ we enqueue it's possible that the
+  // event will get deleted after we enqueue it and before we try and
+  // use it again!
+  struct Visitor : EventVisitor
+  {
+    explicit Visitor(ProcessBase* process) : process(process) {}
+
+    virtual void visit(const MessageEvent&)
+    {
+      process->metrics_message_events_enqueued++;
+    }
+
+    virtual void visit(const HttpEvent&)
+    {
+      process->metrics_http_events_enqueued++;
+    }
+
+    virtual void visit(const DispatchEvent&)
+    {
+      process->metrics_dispatch_events_enqueued++;
+    }
+
+    virtual void visit(const ExitedEvent&)
+    {
+      process->metrics_exited_events_enqueued++;
+    }
+
+    virtual void visit(const TerminateEvent&)
+    {
+      process->metrics_terminate_events_enqueued++;
+    }
+
+    ProcessBase* process;
+  } visitor(this);
+
+  event->visit(&visitor);
+
   // Need to check if this is a terminate event _BEFORE_ we enqueue
   // because it's possible that it'll get deleted after we enqueue it
   // and before we use it again!
@@ -3473,16 +3594,7 @@ void ProcessBase::enqueue(Event* event)
     event->is<TerminateEvent>() &&
     event->as<TerminateEvent>().inject;
 
-  switch (old) {
-    case State::BOTTOM:
-    case State::READY:
-    case State::BLOCKED:
-      events->producer.enqueue(event);
-      break;
-    case State::TERMINATING:
-      delete event;
-      return;
-  }
+  events->producer.enqueue(event);
 
   // We need to store terminate _AFTER_ we enqueue the event because
   // the code in `ProcessMNager::resume` assumes that if it sees
