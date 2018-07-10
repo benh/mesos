@@ -33,6 +33,7 @@
 #include <process/pid.hpp>
 
 #include <process/metrics/counter.hpp>
+#include <process/metrics/timer.hpp>
 
 #include <stout/duration.hpp>
 #include <stout/hashmap.hpp>
@@ -446,6 +447,8 @@ private:
     Option<std::string> realm;
     Option<AuthenticatedHttpRequestHandler> authenticatedHandler;
     RouteOptions options;
+
+    Option<metrics::Timer<Milliseconds>> timer;
   };
 
   // Handlers for messages and HTTP requests.

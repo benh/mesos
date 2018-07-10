@@ -257,6 +257,11 @@ struct Flags : public virtual flags::FlagsBase
         "If set to false, disables the memory profiling functionality\n"
         "of libprocess.",
         false);
+
+    add(&Flags::time_http_endpoints,
+        "time_http_endpoints",
+        "If set to true, adds a timer for every HTTP endpoint.",
+        false);
   }
 
   Option<net::IP> ip;
@@ -266,6 +271,7 @@ struct Flags : public virtual flags::FlagsBase
   Option<int> advertise_port;
   bool require_peer_address_ip_match;
   bool memory_profiling;
+  bool time_http_endpoints;
 };
 
 } // namespace internal {
@@ -3490,6 +3496,12 @@ ProcessBase::~ProcessBase()
   metrics::remove(metrics_exited_events_dequeued);
   metrics::remove(metrics_terminate_events_enqueued);
   metrics::remove(metrics_terminate_events_dequeued);
+
+  foreachvalue (const HttpEndpoint& endpoint, handlers.http) {
+    if (endpoint.timer.isSome()) {
+      metrics::remove(endpoint.timer.get());
+    }
+  }
 }
 
 
@@ -3933,6 +3945,24 @@ void ProcessBase::route(
   endpoint.handler = handler;
   endpoint.options = options;
 
+  if (libprocess_flags->time_http_endpoints) {
+    auto timer = metrics::Timer<Milliseconds>(pid.id + name + "_timer");
+
+    metrics::add(timer);
+
+    // Store the timer so we can remove it when process is cleaned up.
+    endpoint.timer = timer;
+
+    endpoint.handler =
+      [handler, timer](const Request& request) mutable {
+        timer.start();
+        return handler(request)
+          .onAny([timer]() mutable {
+            timer.stop();
+          });
+    };
+  }
+
   handlers.http[name.substr(1)] = endpoint;
 
   dispatch(help, &Help::add, pid.id, name, help_);
@@ -3957,6 +3987,24 @@ void ProcessBase::route(
   endpoint.realm = realm;
   endpoint.authenticatedHandler = handler;
   endpoint.options = options;
+
+  if (libprocess_flags->time_http_endpoints) {
+    auto timer = metrics::Timer<Milliseconds>(pid.id + name + "_timer");
+    metrics::add(timer);
+
+    // Store the timer so we can remove it when process is cleaned up.
+    endpoint.timer = timer;
+
+    endpoint.authenticatedHandler =
+      [handler, timer](const Request& request,
+                       const Option<Principal>& principal) mutable {
+        timer.start();
+        return handler(request, principal)
+          .onAny([timer]() mutable {
+            timer.stop();
+          });
+    };
+  }
 
   handlers.http[name.substr(1)] = endpoint;
 

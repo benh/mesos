@@ -2621,3 +2621,157 @@ TEST(HttpServerTest, Finalize)
 
   AWAIT_EXPECT_ABANDONED(run);
 }
+
+
+class TimeHttpEndpointsTest : public HTTPTest
+{
+public:
+  static void SetUpTestCase()
+  {
+    old = os::getenv("LIBPROCESS_TIME_HTTP_ENDPOINTS");
+
+    os::setenv("LIBPROCESS_TIME_HTTP_ENDPOINTS", "true");
+  }
+
+  static void TearDownTestCase()
+  {
+    os::unsetenv("LIBPROCESS_TIME_HTTP_ENDPOINTS");
+
+    if (old.isSome()) {
+      os::setenv("LIBPROCESS_TIME_HTTP_ENDPOINTS", old.get());
+      old = None();
+    }
+
+    HTTPTest::TearDownTestCase();
+  }
+
+private:
+  static Option<string> old;
+};
+
+Option<string> TimeHttpEndpointsTest::old = None();
+
+
+// NOTE: We don't simply `#ifdef` out the `string("https")` argument inside
+// the `INSTANTIATE_TEST_CASE_P` because the `#ifdef` would not be required
+// to expand. In particular, it would break the build with MSVC.
+#ifdef USE_SSL_SOCKET
+INSTANTIATE_TEST_CASE_P(
+    Scheme,
+    TimeHttpEndpointsTest,
+    ::testing::Values(
+        string("https"),
+        string("http")));
+#else
+INSTANTIATE_TEST_CASE_P(
+    Scheme,
+    TimeHttpEndpointsTest,
+    ::testing::Values(
+        string("http")));
+#endif // USE_SSL_SOCKET
+
+
+TEST_P(TimeHttpEndpointsTest, TimeHttpEndpoints)
+{
+  Http http;
+
+  EXPECT_CALL(*http.process, body(_))
+    .WillOnce(Return(http::OK()));
+
+  Future<http::Response> response =
+    http::get(http.process->self(), "/body", None(), None(), GetParam());
+
+  AWAIT_EXPECT_RESPONSE_STATUS_EQ(http::OK().status, response);
+
+  // Get the metrics.
+  UPID metrics("metrics", process::address());
+
+  response = http::get(metrics, "/snapshot", None(), None(), GetParam());
+
+  AWAIT_ASSERT_RESPONSE_STATUS_EQ(http::OK().status, response);
+
+  Try<JSON::Object> json = JSON::parse<JSON::Object>(response->body);
+  ASSERT_SOME(json);
+
+  string metric = http.process->self().id + "/body_timer_ms";
+
+  EXPECT_EQ(1u, json->values.count(metric));
+  EXPECT_LT(0.0, json->values[metric].as<JSON::Number>().as<double>());
+}
+
+
+class TimeAuthenticatedHttpEndpointsTest : public HttpAuthenticationTest
+{
+public:
+  static void SetUpTestCase()
+  {
+    old = os::getenv("LIBPROCESS_TIME_HTTP_ENDPOINTS");
+
+    os::setenv("LIBPROCESS_TIME_HTTP_ENDPOINTS", "true");
+
+    process::reinitialize(
+        None(),
+        READWRITE_HTTP_AUTHENTICATION_REALM,
+        READONLY_HTTP_AUTHENTICATION_REALM);
+  }
+
+  static void TearDownTestCase()
+  {
+    os::unsetenv("LIBPROCESS_TIME_HTTP_ENDPOINTS");
+
+    if (old.isSome()) {
+      os::setenv("LIBPROCESS_TIME_HTTP_ENDPOINTS", old.get());
+      old = None();
+    }
+
+    process::reinitialize(
+        None(),
+        READWRITE_HTTP_AUTHENTICATION_REALM,
+        READONLY_HTTP_AUTHENTICATION_REALM);
+  }
+
+private:
+  static Option<string> old;
+};
+
+Option<string> TimeAuthenticatedHttpEndpointsTest::old = None();
+
+
+TEST_F(TimeAuthenticatedHttpEndpointsTest, TimeHttpEndpoints)
+{
+  MockAuthenticator* authenticator = new MockAuthenticator();
+  setAuthenticator("realm", Owned<Authenticator>(authenticator));
+
+  Http http;
+
+  AuthenticationResult authentication;
+  authentication.principal = Principal("principal");
+
+  EXPECT_CALL((*authenticator), authenticate(_))
+    .WillOnce(Return(authentication));
+
+  EXPECT_CALL(*http.process, authenticated(_, Option<Principal>("principal")))
+    .WillOnce(Return(http::OK()));
+
+  // Note that we don't bother pretending to specify a valid
+  // 'Authorization' header since we force authentication success.
+  Future<http::Response> response =
+    http::get(http.process->self(), "/authenticated");
+
+  AWAIT_EXPECT_RESPONSE_STATUS_EQ(http::OK().status, response);
+
+  // Get the metrics.
+  UPID metrics("metrics", process::address());
+
+  response = http::get(metrics, "/snapshot");
+
+  AWAIT_ASSERT_RESPONSE_STATUS_EQ(http::OK().status, response);
+
+  Try<JSON::Object> json = JSON::parse<JSON::Object>(response->body);
+  ASSERT_SOME(json);
+
+  string metric = http.process->self().id + "/authenticated_timer_ms";
+
+  EXPECT_EQ(1u, json->values.count(metric));
+  EXPECT_LT(0.0, json->values[metric].as<JSON::Number>().as<double>());
+}
